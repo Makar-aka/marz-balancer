@@ -2,6 +2,7 @@ import os
 import time
 import asyncio
 from typing import Dict, Any, Optional, List
+from contextlib import asynccontextmanager
 
 import aiohttp
 from dotenv import load_dotenv
@@ -9,8 +10,6 @@ from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, JSONResponse
 
 load_dotenv()
-
-APP = FastAPI()
 
 MARZBAN_URL = os.getenv("MARZBAN_URL", "").rstrip("/")
 MARZBAN_ADMIN_USER = os.getenv("MARZBAN_ADMIN_USER", "")
@@ -308,11 +307,24 @@ async def poll_loop():
             await asyncio.sleep(POLL_INTERVAL)
 
 
-@APP.on_event("startup")
-async def startup():
+# Lifespan handler replaces deprecated @APP.on_event("startup")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # start background polling task
     if not MARZBAN_URL:
         stats["error"] = "MARZBAN_URL not configured"
-    asyncio.create_task(poll_loop())
+    task = asyncio.create_task(poll_loop())
+    try:
+        yield
+    finally:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+
+APP = FastAPI(lifespan=lifespan)
 
 
 @APP.get("/api/stats")
@@ -345,3 +357,49 @@ async def index():
         if n.get("message"):
             items += f"Message: {n.get('message')}<br/>"
         items += f"Clients: {n.get('clients_count') if n.get('clients_count') is not None else '—'}<br/>"
+        items += f"Uplink: {n.get('uplink') if n.get('uplink') is not None else '—'} Downlink: {n.get('downlink') if n.get('downlink') is not None else '—'}<br/>"
+        if n.get("detected_path"):
+            items += f"Detected path: {n.get('detected_path')}<br/>"
+        if n.get("clients_error"):
+            items += f"<div style='color:#b00'>Clients error: {n.get('clients_error')}</div>"
+        if n.get("clients"):
+            items += "<details><summary>Клиенты (пример)</summary><ul>"
+            for c in n.get("clients")[:20]:
+                if isinstance(c, dict):
+                    identifier = c.get("id") or c.get("peer") or c.get("addr") or str(c)
+                else:
+                    identifier = str(c)
+                items += f"<li>{identifier}</li>"
+            items += "</ul></details>"
+        items += "</div>"
+    if not items:
+        items = "<div>Ноды не обнаружены.</div>"
+
+    users_usage_summary = ""
+    if stats.get("users_usage"):
+        users_usage_summary = "<h3>Users usage (sample)</h3><ul>"
+        for u in (stats["users_usage"] or [])[:50]:
+            uname = u.get("username")
+            usages = u.get("usages") or []
+            nodes_used = ", ".join([str(x.get("node_name") or x.get("node_id")) for x in usages])
+            users_usage_summary += f"<li>{uname}: {nodes_used}</li>"
+        users_usage_summary += "</ul>"
+
+    html = f"""<!doctype html>
+<html><head><meta charset="utf-8"><title>Marzban nodes</title></head><body>
+<h1>Marzban — ноды</h1>
+{header}
+<div style="color:#b00">{err or ''}</div>
+<div>{items}</div>
+{users_usage_summary}
+<script>
+setTimeout(()=>location.reload(), {int(POLL_INTERVAL*1000)});
+</script>
+</body></html>"""
+    return HTMLResponse(content=html)
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run("marz_balancer:APP", host="0.0.0.0", port=APP_PORT, reload=True)
