@@ -327,6 +327,28 @@ async def lifespan(app: FastAPI):
 APP = FastAPI(lifespan=lifespan)
 
 
+def _normalize_users_usage(data: Any) -> List[Dict[str, Any]]:
+    """
+    Normalize stats['users_usage'] into a list of user-usage entries.
+    Handles cases where master returns a list or a dict with a key containing the list.
+    """
+    if not data:
+        return []
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        # common keys: 'users', 'items', or top-level list under some key
+        for key in ("users", "items", "data", "usages"):
+            v = data.get(key)
+            if isinstance(v, list):
+                return v
+        # fallback: find the first list value
+        for v in data.values():
+            if isinstance(v, list):
+                return v
+    return []
+
+
 @APP.get("/api/stats")
 async def api_stats():
     return JSONResponse(content=stats)
@@ -375,11 +397,13 @@ async def index():
     if not items:
         items = "<div>Ноды не обнаружены.</div>"
 
+    # normalize users_usage to list safely
+    users_list = _normalize_users_usage(stats.get("users_usage"))
     users_usage_summary = ""
-    if stats.get("users_usage"):
+    if users_list:
         users_usage_summary = "<h3>Users usage (sample)</h3><ul>"
-        for u in (stats["users_usage"] or [])[:50]:
-            uname = u.get("username")
+        for u in users_list[:50]:
+            uname = u.get("username") or str(u.get("user") if isinstance(u, dict) else u)
             usages = u.get("usages") or []
             nodes_used = ", ".join([str(x.get("node_name") or x.get("node_id")) for x in usages])
             users_usage_summary += f"<li>{uname}: {nodes_used}</li>"
