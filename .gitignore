@@ -1,0 +1,7 @@
+.env
+__pycache__/
+*.pyc
+*.sln
+*.pyproj
+.vs
+.git
