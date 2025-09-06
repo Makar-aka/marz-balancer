@@ -129,7 +129,7 @@ async def index():
         items += "</div>"
     if not items:
         items = "<div>Ноды не обнаружены.</div>"
-    html = f\"\"\"<!doctype html>
+    html = f"""<!doctype html>
 <html><head><meta charset="utf-8"><title>Marzban nodes</title></head><body>
 <h1>Marzban — ноды</h1>
 <div>Последнее обновление: {last_str}</div>
@@ -138,7 +138,7 @@ async def index():
 <script>
 setTimeout(()=>location.reload(), {int(POLL_INTERVAL*1000)});
 </script>
-</body></html>\"\"\"
+</body></html>"""
     return HTMLResponse(content=html)
 
 
