@@ -33,7 +33,14 @@ NODE_CANDIDATE_PATHS = [
 ]
 
 # runtime state
-stats: Dict[str, Any] = {"nodes": [], "last_update": None, "error": None}
+stats: Dict[str, Any] = {
+    "nodes": [],
+    "last_update": None,
+    "error": None,
+    "system": None,
+    "nodes_usage": None,
+    "users_usage": None,
+}
 _token_cache: Dict[str, Any] = {"token": None, "fetched_at": 0, "ttl": 300}
 
 
@@ -77,21 +84,73 @@ async def _fetch_nodes(session: aiohttp.ClientSession, token: Optional[str]) -> 
         return None
 
 
+async def _fetch_system(session: aiohttp.ClientSession, token: Optional[str]) -> Optional[Dict[str, Any]]:
+    if not MARZBAN_URL:
+        return None
+    headers = {}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    url = f"{MARZBAN_URL}/api/system"
+    try:
+        async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+            if resp.status != 200:
+                return None
+            return await resp.json()
+    except Exception:
+        return None
+
+
+async def _fetch_nodes_usage(session: aiohttp.ClientSession, token: Optional[str], start: Optional[str] = None, end: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    if not MARZBAN_URL:
+        return None
+    headers = {}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    params = {}
+    if start:
+        params["start"] = start
+    if end:
+        params["end"] = end
+    url = f"{MARZBAN_URL}/api/nodes/usage"
+    try:
+        async with session.get(url, headers=headers, params=params, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+            if resp.status != 200:
+                return None
+            return await resp.json()
+    except Exception:
+        return None
+
+
+async def _fetch_users_usage(session: aiohttp.ClientSession, token: Optional[str], start: Optional[str] = None, end: Optional[str] = None) -> Optional[List[Dict[str, Any]]]:
+    if not MARZBAN_URL:
+        return None
+    headers = {}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    params = {}
+    if start:
+        params["start"] = start
+    if end:
+        params["end"] = end
+    url = f"{MARZBAN_URL}/api/users/usage"
+    try:
+        async with session.get(url, headers=headers, params=params, timeout=aiohttp.ClientTimeout(total=20)) as resp:
+            if resp.status != 200:
+                return None
+            return await resp.json()
+    except Exception:
+        return None
+
+
 def _build_node_base(node: Dict[str, Any]) -> str:
-    """
-    Build node API base URL from node info returned by master.
-    Prefers explicit 'address' and 'api_port'. If address already contains scheme, use it.
-    """
     addr = node.get("address") or node.get("name") or ""
     api_port = node.get("api_port")
     if not addr:
         return ""
     if addr.startswith("http://") or addr.startswith("https://"):
-        # if api_port present and address doesn't include port, append it
         if api_port and ":" not in addr.split("://", 1)[1]:
             return f"{addr.rstrip('/')}:{api_port}"
         return addr.rstrip("/")
-    # default to http scheme for node API
     if api_port:
         return f"http://{addr}:{api_port}"
     return f"http://{addr}"
@@ -113,9 +172,6 @@ async def _try_node_path(session: aiohttp.ClientSession, base: str, path: str, t
 
 
 def _normalize_node_response(data: Any) -> Dict[str, Any]:
-    """
-    Normalize node API response into {'count': int, 'clients': list}
-    """
     clients: List[Any] = []
     count = 0
     if isinstance(data, list):
@@ -129,7 +185,6 @@ def _normalize_node_response(data: Any) -> Dict[str, Any]:
                 return {"count": count, "clients": clients}
         if "count" in data and isinstance(data["count"], int):
             return {"count": data["count"], "clients": []}
-        # raw text / unknown shape
         for k, v in data.items():
             if isinstance(v, list):
                 clients = v
@@ -139,10 +194,6 @@ def _normalize_node_response(data: Any) -> Dict[str, Any]:
 
 
 async def fetch_node_clients(session: aiohttp.ClientSession, node: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Try to detect node's clients endpoint and return count + sample clients.
-    Returns {'count': int, 'clients': list, 'detected_path': Optional[str], 'error': Optional[str]}
-    """
     base = _build_node_base(node)
     result = {"count": 0, "clients": [], "detected_path": None, "error": None}
     if not base:
@@ -150,11 +201,9 @@ async def fetch_node_clients(session: aiohttp.ClientSession, node: Dict[str, Any
         return result
 
     paths = []
-    # try explicit configured path if present (master may not supply this; left for future)
     cfg_path = node.get("clients_path")
     if cfg_path:
         paths.append(cfg_path)
-    # then candidate list
     for p in NODE_CANDIDATE_PATHS:
         if p not in paths:
             paths.append(p)
@@ -164,10 +213,8 @@ async def fetch_node_clients(session: aiohttp.ClientSession, node: Dict[str, Any
         if res is None:
             continue
         if isinstance(res, dict) and res.get("error"):
-            # try next path
             continue
         norm = _normalize_node_response(res)
-        # Accept if something meaningful or valid JSON response (even empty list)
         if norm["count"] > 0 or len(norm["clients"]) > 0 or isinstance(res, (list, dict)):
             result.update({"count": norm["count"], "clients": norm["clients"], "detected_path": p})
             return result
@@ -181,7 +228,21 @@ async def poll_loop():
         while True:
             try:
                 token = await _fetch_token(session)
-                nodes = await _fetch_nodes(session, token)
+
+                # parallel master calls: nodes, system, nodes_usage, users_usage
+                tasks_master = [
+                    _fetch_nodes(session, token),
+                    _fetch_system(session, token),
+                    _fetch_nodes_usage(session, token),
+                    _fetch_users_usage(session, token),
+                ]
+                nodes, system_stat, nodes_usage, users_usage = await asyncio.gather(*tasks_master)
+
+                # store master-level data
+                stats["system"] = system_stat
+                stats["nodes_usage"] = nodes_usage
+                stats["users_usage"] = users_usage
+
                 if nodes is None:
                     stats["error"] = "failed to fetch nodes"
                     stats["nodes"] = []
@@ -204,8 +265,23 @@ async def poll_loop():
                         "clients": [],
                         "detected_path": None,
                         "clients_error": None,
+                        # usage fields (from nodes_usage)
+                        "uplink": None,
+                        "downlink": None,
                     }
                     node_entries.append(entry)
+
+                # attach nodes_usage (uplink/downlink) if available
+                if nodes_usage and isinstance(nodes_usage, dict):
+                    usages = nodes_usage.get("usages") or []
+                    # usages: list of {node_id,node_name,uplink,downlink}
+                    for entry in node_entries:
+                        # try match by id then by name
+                        for u in usages:
+                            if (entry["id"] is not None and u.get("node_id") == entry["id"]) or (u.get("node_name") and u.get("node_name") == entry.get("name")):
+                                entry["uplink"] = u.get("uplink")
+                                entry["downlink"] = u.get("downlink")
+                                break
 
                 # concurrently query node APIs for live clients
                 tasks = [fetch_node_clients(session, n) for n in nodes]
@@ -249,7 +325,15 @@ async def index():
     nodes = stats.get("nodes", [])
     last = stats.get("last_update")
     err = stats.get("error")
+    system = stats.get("system")
     last_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(last)) if last else "—"
+
+    header = f"<div>Последнее обновление: {last_str}</div>"
+    if system:
+        header += f"<div>Online users (master): {system.get('online_users', '—')}</div>"
+        header += f"<div>Incoming bandwidth: {system.get('incoming_bandwidth', '—')}</div>"
+        header += f"<div>Outgoing bandwidth: {system.get('outgoing_bandwidth', '—')}</div>"
+
     items = ""
     for n in nodes:
         items += "<div style='border:1px solid #ddd;padding:8px;margin:6px;'>"
@@ -261,37 +345,3 @@ async def index():
         if n.get("message"):
             items += f"Message: {n.get('message')}<br/>"
         items += f"Clients: {n.get('clients_count') if n.get('clients_count') is not None else '—'}<br/>"
-        if n.get("detected_path"):
-            items += f"Detected path: {n.get('detected_path')}<br/>"
-        if n.get("clients_error"):
-            items += f"<div style='color:#b00'>Clients error: {n.get('clients_error')}</div>"
-        # show first N clients for brevity
-        if n.get("clients"):
-            items += "<details><summary>Клиенты (пример)</summary><ul>"
-            for c in n.get("clients")[:20]:
-                if isinstance(c, dict):
-                    identifier = c.get("id") or c.get("peer") or c.get("addr") or str(c)
-                else:
-                    identifier = str(c)
-                items += f"<li>{identifier}</li>"
-            items += "</ul></details>"
-        items += "</div>"
-    if not items:
-        items = "<div>Ноды не обнаружены.</div>"
-    html = f"""<!doctype html>
-<html><head><meta charset="utf-8"><title>Marzban nodes</title></head><body>
-<h1>Marzban — ноды</h1>
-<div>Последнее обновление: {last_str}</div>
-<div style="color:#b00">{err or ''}</div>
-<div>{items}</div>
-<script>
-setTimeout(()=>location.reload(), {int(POLL_INTERVAL*1000)});
-</script>
-</body></html>"""
-    return HTMLResponse(content=html)
-
-
-if __name__ == "__main__":
-    import uvicorn
-
-    uvicorn.run("marz_balancer:APP", host="0.0.0.0", port=APP_PORT, reload=True)
