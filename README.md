@@ -1,0 +1,55 @@
+# MarzBalancer
+
+**MarzBalancer** — это FastAPI-приложение для мониторинга и агрегации статистики по нодам Marzban. Сервис собирает информацию о состоянии, клиентах и трафике всех подключённых нод, а также отображает сводную статистику в удобном веб-интерфейсе.
+
+## Возможности
+
+- Агрегация информации о всех нодах Marzban через API.
+- Отображение количества клиентов, статуса, uplink/downlink и другой информации по каждой ноде.
+- Суммарная статистика по всем нодам.
+- REST API для получения статистики в формате JSON.
+- Простая установка и запуск через Docker.
+
+## Быстрый старт
+
+1. **Клонируйте репозиторий:**
+
+```
+git clone https://github.com/Makar-aka/marz-balancer.git cd marz-balancer
+```
+
+2. **Создайте файл `.env` на основе `.env.example` и заполните параметры подключения:**
+
+MARZBAN_URL=https://your-marzban-host MARZBAN_ADMIN_USER=admin MARZBAN_ADMIN_PASS=yourpassword
+
+
+3. **Запустите через Docker Compose:**
+
+```
+docker-compose up --build
+```
+
+4. **Откройте веб-интерфейс:**
+
+http://localhost:ваш порт/
+
+
+## API
+
+- `GET /api/stats` — получить текущую агрегированную статистику в формате JSON.
+
+## Зависимости
+
+- Python 3.9+
+- FastAPI
+- aiohttp
+- python-dotenv
+- uvicorn
+
+## Лицензия
+
+MIT
+
+---
+
+© [MakarSPB](https://github.com/Makar-aka/marz-balancer)
