@@ -10,7 +10,7 @@ import aiohttp
 import pandas as pd
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 
 load_dotenv()
 
