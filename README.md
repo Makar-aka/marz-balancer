@@ -25,9 +25,6 @@ git clone https://github.com/Makar-aka/marz-balancer.git cd marz-balancer
 
 2. **Создайте файл `.env` на основе `.env.example` и заполните параметры подключения:**
 
-MARZBAN_URL=https://your-marzban-host MARZBAN_ADMIN_USER=admin MARZBAN_ADMIN_PASS=yourpassword
-
-
 3. **Запустите через Docker Compose:**
 
 ```
