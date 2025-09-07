@@ -432,6 +432,18 @@ APP = FastAPI(lifespan=lifespan)
 async def api_stats():
     return JSONResponse(content=stats)
 
+def human_bytes(num: Optional[int]) -> str:
+    """Форматирует байты в человекочитаемый вид (КБ, МБ, ГБ, ТБ)."""
+    if num is None:
+        return "—"
+    for unit in ['Б', 'КБ', 'МБ', 'ГБ', 'ТБ', 'ПБ']:
+        if abs(num) < 1024.0:
+            if unit == 'Б':
+                return f"{num} {unit}"
+            return f"{num:.2f} {unit}"
+        num /= 1024.0
+    return f"{num:.2f} ЭБ"
+
 @APP.get("/", response_class=HTMLResponse)
 async def index():
     nodes = stats.get("nodes", [])
@@ -451,8 +463,8 @@ async def index():
         header += f"""
         <div class="mb-3">
             <span class="badge bg-success">Online users (master): {system.get('online_users', '—')}</span>
-            <span class="badge bg-primary ms-2">Incoming bandwidth: {system.get('incoming_bandwidth', '—')}</span>
-            <span class="badge bg-primary ms-2">Outgoing bandwidth: {system.get('outgoing_bandwidth', '—')}</span>
+            <span class="badge bg-primary ms-2">Incoming bandwidth: {human_bytes(system.get('incoming_bandwidth'))}</span>
+            <span class="badge bg-primary ms-2">Outgoing bandwidth: {human_bytes(system.get('outgoing_bandwidth'))}</span>
         </div>
         """
 
@@ -470,7 +482,7 @@ async def index():
                         <li class="list-group-item"><b>API port:</b> {n.get('api_port') or '—'}</li>
                         <li class="list-group-item"><b>Status:</b> {n.get('status') or '—'}</li>
                         <li class="list-group-item"><b>Clients:</b> {n.get('clients_count') if n.get('clients_count') is not None else '—'}</li>
-                        <li class="list-group-item"><b>Uplink:</b> {n.get('uplink') if n.get('uplink') is not None else '—'} <b>Downlink:</b> {n.get('downlink') if n.get('downlink') is not None else '—'}</li>
+                        <li class="list-group-item"><b>Uplink:</b> {human_bytes(n.get('uplink'))} <b>Downlink:</b> {human_bytes(n.get('downlink'))}</li>
                     </ul>
                     {"<div class='alert alert-danger mt-2'>Clients error: " + n.get('clients_error') + "</div>" if n.get('clients_error') else ""}
                 </div>
