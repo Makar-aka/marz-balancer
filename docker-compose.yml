@@ -15,5 +15,4 @@ services:
       - ./.env:/app/.env:ro
       - ./data:/data
     working_dir: /app
-    command: >
-      python marz_balancer.py
+    command: python marz_balancer.py
