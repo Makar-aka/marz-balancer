@@ -18,7 +18,7 @@ TELEGRAM_ENABLED = os.getenv("TELEGRAM_ENABLED", "false").lower() in ("true", "1
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-NODE_REMINDER_INTERVAL = int(os.getenv("NODE_REMINDER_INTERVAL", "6"))
+NODE_REMINDER_INTERVAL = int(os.getenv("NODE_REMINDER_INTERVAL", "360"))
 
 # Paths
 NODE_CANDIDATE_PATHS = [

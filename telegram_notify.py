@@ -241,7 +241,8 @@ async def check_node_status_changes(nodes):
 async def check_offline_nodes_reminders(nodes):
     """Напоминания о нодах, которые долго остаются недоступными"""
     current_time = datetime.utcnow().timestamp()
-    reminder_interval_seconds = NODE_REMINDER_INTERVAL * 3600
+    # Теперь интервал в минутах вместо часов
+    reminder_interval_seconds = NODE_REMINDER_INTERVAL * 60  # минуты * 60 = секунды
     
     for node in nodes:
         node_id = node.get("id")
@@ -264,11 +265,11 @@ async def check_offline_nodes_reminders(nodes):
                     downtime_seconds = current_time - down_time
                     total_downtime = format_downtime(downtime_seconds)
                 
-                # Время с последнего уведомления
-                hours_since_notify = "неизвестно"
+                # Время с последнего уведомления в минутах
+                minutes_since_notify = "неизвестно"
                 if last_notified:
-                    hours = (current_time - last_notified) / 3600
-                    hours_since_notify = f"{hours:.1f}"
+                    minutes = (current_time - last_notified) / 60  # теперь в минутах
+                    minutes_since_notify = f"{minutes:.1f}"
                     
                 message = f"⚠️ <b>Напоминание:</b> Нода {node_name} остаётся недоступной\n"
                 message += f"Общее время отвала: {total_downtime}\n"

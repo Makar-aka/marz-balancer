@@ -9,7 +9,9 @@
 - Суммарная статистика по всем нодам.
 - REST API для получения статистики в формате JSON.
 - Простая установка и запуск через Docker.
+- Добавлены уведомления в телеграм. 
 
+ 
 Для подсчета клиентских подключений к нодам, надо установить ip-агент на каждую ноду Marzban.
 https://github.com/Makar-aka/ip_agent
 
@@ -43,11 +45,11 @@ http://localhost:ваш порт/
 
 ## Зависимости
 
-- Python 3.9+
-- FastAPI
-- aiohttp
-- python-dotenv
+- fastapi
 - uvicorn
+- python-dotenv
+- aiohttp
+- redis
 
 ## Лицензия
 
