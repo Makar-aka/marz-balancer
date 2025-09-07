@@ -360,7 +360,7 @@ async def poll_loop():
                 # store master-level data
                 stats["system"] = system_stat
                 stats["nodes_usage"] = nodes_usage
-                
+
                 if nodes is None:
                     stats["error"] = "failed to fetch nodes"
                     stats["nodes"] = []
@@ -388,11 +388,9 @@ async def poll_loop():
                         "downlink": None,
                     }
                     node_entries.append(entry)
-                
-              
+
                 stats["users_usage"] = users_usage
 
-                
                 # attach nodes_usage (uplink/downlink) if available
                 if nodes_usage and isinstance(nodes_usage, dict):
                     usages = nodes_usage.get("usages") or []
@@ -426,7 +424,10 @@ async def poll_loop():
                         node_entries[i]["clients_meta"] = res.get("meta")
 
                 stats["nodes"] = node_entries
+
+                # Сохраняем статистику только после того, как clients_count заполнены!
                 save_node_stats(node_entries)
+
                 # get unique remote IPs to MONITOR_PORT without blocking loop (local fallback)
                 try:
                     unique_ips = await asyncio.to_thread(get_unique_remote_ips, MONITOR_PORT)
