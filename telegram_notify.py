@@ -229,7 +229,7 @@ async def check_node_status_changes(nodes):
                     current_time = datetime.utcnow().timestamp()
                     downtime_seconds = current_time - down_time
                     formatted_downtime = format_downtime(downtime_seconds)
-                    message += f"\nВремя недоступности: {formatted_downtime}"
+                    message += f"\nВремя отвала: {formatted_downtime}"
                 
                 await send_telegram_message(message)
                 
@@ -271,7 +271,7 @@ async def check_offline_nodes_reminders(nodes):
                     hours_since_notify = f"{hours:.1f}"
                     
                 message = f"⚠️ <b>Напоминание:</b> Нода {node_name} остаётся недоступной\n"
-                message += f"Общее время недоступности: {total_downtime}\n"
+                message += f"Общее время отвала: {total_downtime}\n"
                 message += f"Статус: {current_status}"
                 
                 await send_telegram_message(message)
