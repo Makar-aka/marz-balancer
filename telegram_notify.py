@@ -1,5 +1,5 @@
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, Any, List, Set
 import redis.asyncio as redis
 import aiohttp
@@ -79,6 +79,53 @@ async def get_node_last_notified(node_id):
         return float(result) if result else None
     except Exception:
         return None
+
+async def set_node_down_time(node_id):
+    """Записать время, когда нода стала недоступна"""
+    if not redis_client:
+        return
+    try:
+        # Проверяем, не записано ли уже время недоступности
+        if not await redis_client.exists(f"node:{node_id}:down_time"):
+            current_time = datetime.utcnow().timestamp()
+            await redis_client.set(f"node:{node_id}:down_time", str(current_time))
+    except Exception as e:
+        print(f"Ошибка сохранения времени недоступности: {e}")
+
+async def get_node_down_time(node_id):
+    """Получить время, когда нода стала недоступна"""
+    if not redis_client:
+        return None
+    try:
+        result = await redis_client.get(f"node:{node_id}:down_time")
+        return float(result) if result else None
+    except Exception:
+        return None
+
+async def clear_node_down_time(node_id):
+    """Удалить время недоступности ноды (когда она снова доступна)"""
+    if not redis_client:
+        return
+    try:
+        await redis_client.delete(f"node:{node_id}:down_time")
+    except Exception as e:
+        print(f"Ошибка удаления времени недоступности: {e}")
+
+def format_downtime(seconds):
+    """Форматирует время недоступности в читаемом виде"""
+    if seconds < 60:
+        return f"{int(seconds)} сек"
+    
+    minutes = seconds / 60
+    if minutes < 60:
+        return f"{int(minutes)} мин"
+    
+    hours = minutes / 60
+    if hours < 24:
+        return f"{hours:.1f} ч"
+    
+    days = hours / 24
+    return f"{days:.1f} д"
 
 async def save_node_ids_to_redis(node_ids):
     """Сохраняет список ID нод в Redis"""
@@ -166,14 +213,28 @@ async def check_node_status_changes(nodes):
             node_name = node.get("name") or node.get("address") or f"Node {node_id}"
             
             if current_status != "connected" and previous_status == "connected":
+                # Нода стала недоступной, сохраняем время
+                await set_node_down_time(node_id)
                 message = f"⚠️ <b>Нода недоступна:</b> {node_name}\n"
                 message += f"Текущий статус: {current_status}"
                 await send_telegram_message(message)
                 await set_node_last_notified(node_id)
                 
             elif current_status == "connected" and previous_status != "connected":
+                # Нода восстановилась, проверяем сколько времени была недоступна
+                down_time = await get_node_down_time(node_id)
                 message = f"✅ <b>Нода снова доступна:</b> {node_name}"
+                
+                if down_time:
+                    current_time = datetime.utcnow().timestamp()
+                    downtime_seconds = current_time - down_time
+                    formatted_downtime = format_downtime(downtime_seconds)
+                    message += f"\nВремя недоступности: {formatted_downtime}"
+                
                 await send_telegram_message(message)
+                
+                # Очищаем информацию о времени недоступности
+                await clear_node_down_time(node_id)
                 
         await save_node_status_to_redis(node_id, current_status)
 
@@ -194,12 +255,23 @@ async def check_offline_nodes_reminders(nodes):
             
             if last_notified is None or (current_time - last_notified) > reminder_interval_seconds:
                 node_name = node.get("name") or node.get("address") or f"Node {node_id}"
-                hours_offline = "неизвестно"
+                
+                # Получаем время начала недоступности
+                down_time = await get_node_down_time(node_id)
+                total_downtime = "неизвестно"
+                
+                if down_time:
+                    downtime_seconds = current_time - down_time
+                    total_downtime = format_downtime(downtime_seconds)
+                
+                # Время с последнего уведомления
+                hours_since_notify = "неизвестно"
                 if last_notified:
                     hours = (current_time - last_notified) / 3600
-                    hours_offline = f"{hours:.1f}"
+                    hours_since_notify = f"{hours:.1f}"
                     
-                message = f"⚠️ <b>Напоминание:</b> Нода {node_name} остаётся недоступной {hours_offline} часов\n"
+                message = f"⚠️ <b>Напоминание:</b> Нода {node_name} остаётся недоступной\n"
+                message += f"Общее время недоступности: {total_downtime}\n"
                 message += f"Статус: {current_status}"
                 
                 await send_telegram_message(message)
