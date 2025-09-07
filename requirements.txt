@@ -2,8 +2,4 @@ fastapi
 aiohttp
 python-dotenv
 uvicorn
-scapy
-matplotlib
-plotly
 pandas
-bokeh
