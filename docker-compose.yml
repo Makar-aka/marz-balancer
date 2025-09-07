@@ -9,6 +9,7 @@ services:
       - "${APP_PORT:-8023}:8023"
     environment:
       - PYTHONUNBUFFERED=1
+      - REDIS_URL=redis://redis:6379/0
     volumes:
       - ./marz_balancer.py:/app/marz_balancer.py:ro
       - ./requirements.txt:/app/requirements.txt:ro
@@ -16,3 +17,16 @@ services:
       - ./data:/data
     working_dir: /app
     command: python marz_balancer.py
+    depends_on:
+      - redis
+
+  redis:
+    image: redis:alpine
+    container_name: marz_balancer_redis
+    restart: unless-stopped
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+
+volumes:
+  redis_data:
