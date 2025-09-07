@@ -315,28 +315,6 @@ def _dpi_sniffer_worker(alerts_list: List[Dict[str, str]], stop_event: threading
         except Exception:
             time.sleep(1)
 
-_dpi_thread = None
-_dpi_stop_event = threading.Event()
-def start_torrent_dpi():
-    global _dpi_thread, _dpi_stop_event
-    if sniff is None:
-        print("scapy не установлен, DPI-модуль не запущен")
-        return
-    if _dpi_thread and _dpi_thread.is_alive():
-        return
-    _dpi_stop_event.clear()
-    _dpi_thread = threading.Thread(
-        target=_dpi_sniffer_worker,
-        args=(stats["torrent_alerts"], _dpi_stop_event),
-        daemon=True
-    )
-    _dpi_thread.start()
-    print("DPI-модуль для BitTorrent запущен")
-
-def stop_torrent_dpi():
-    global _dpi_stop_event
-    _dpi_stop_event.set()
-
 async def poll_loop():
     async with aiohttp.ClientSession() as session:
         while True:
