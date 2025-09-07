@@ -3,7 +3,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# Marzban settings
+# Marzban API settings
 MARZBAN_URL = os.getenv("MARZBAN_URL", "").rstrip("/")
 MARZBAN_ADMIN_USER = os.getenv("MARZBAN_ADMIN_USER", "")
 MARZBAN_ADMIN_PASS = os.getenv("MARZBAN_ADMIN_PASS", "")
@@ -17,18 +17,17 @@ MONITOR_PORT = int(os.getenv("MONITOR_PORT", "8443"))
 TELEGRAM_ENABLED = os.getenv("TELEGRAM_ENABLED", "false").lower() in ("true", "1", "yes")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
-
-# Redis settings
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-NODE_REMINDER_INTERVAL = int(os.getenv("NODE_REMINDER_INTERVAL", "6"))  # в часах
+NODE_REMINDER_INTERVAL = int(os.getenv("NODE_REMINDER_INTERVAL", "6"))
 
+# Paths
 NODE_CANDIDATE_PATHS = [
     "/connections",
     "/clients",
     "/status",
 ]
 
-# runtime state
+# Runtime state
 stats = {
     "nodes": [],
     "last_update": None,
@@ -39,4 +38,5 @@ stats = {
     "port_8443": {"unique_clients": 0, "clients": []},
 }
 
+# Token cache
 _token_cache = {"token": None, "fetched_at": 0, "ttl": 300}

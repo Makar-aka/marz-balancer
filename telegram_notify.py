@@ -1,7 +1,8 @@
-import aiohttp
+import asyncio
 from datetime import datetime
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Set
 import redis.asyncio as redis
+import aiohttp
 
 from config import (
     TELEGRAM_ENABLED, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID,
@@ -10,6 +11,7 @@ from config import (
 
 # Redis client
 redis_client = None
+first_run = True
 
 async def init_redis():
     """Инициализация Redis-клиента"""
@@ -22,11 +24,10 @@ async def init_redis():
             print(f"Ошибка подключения к Redis: {e}")
     return False
 
-async def send_telegram_message(message: str):
+async def send_telegram_message(message):
     """Отправка сообщения в Telegram"""
     if not TELEGRAM_ENABLED or not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        return False
-    
+        return
     try:
         async with aiohttp.ClientSession() as session:
             api_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
@@ -39,43 +40,37 @@ async def send_telegram_message(message: str):
                 return await response.json()
     except Exception as e:
         print(f"Ошибка отправки в Telegram: {e}")
-        return False
 
-async def get_node_status_from_redis(node_id) -> Optional[str]:
+async def get_node_status_from_redis(node_id):
     """Получение статуса ноды из Redis"""
     if not redis_client:
         return None
     try:
         status = await redis_client.get(f"node:{node_id}:status")
         return status.decode('utf-8') if status else None
-    except Exception as e:
-        print(f"Ошибка получения статуса из Redis: {e}")
+    except Exception:
         return None
 
-async def save_node_status_to_redis(node_id, status: str):
+async def save_node_status_to_redis(node_id, status):
     """Сохранение статуса ноды в Redis"""
     if not redis_client:
-        return False
+        return
     try:
         await redis_client.set(f"node:{node_id}:status", status)
-        return True
-    except Exception as e:
-        print(f"Ошибка сохранения статуса в Redis: {e}")
-        return False
+    except Exception:
+        pass
 
 async def set_node_last_notified(node_id):
     """Записать время последнего уведомления о ноде"""
     if not redis_client:
-        return False
+        return
     try:
         current_time = datetime.utcnow().timestamp()
         await redis_client.set(f"node:{node_id}:last_notified", str(current_time))
-        return True
-    except Exception as e:
-        print(f"Ошибка сохранения времени уведомления: {e}")
-        return False
+    except Exception:
+        pass
 
-async def get_node_last_notified(node_id) -> Optional[float]:
+async def get_node_last_notified(node_id):
     """Получить время последнего уведомления о ноде"""
     if not redis_client:
         return None
@@ -85,11 +80,80 @@ async def get_node_last_notified(node_id) -> Optional[float]:
     except Exception:
         return None
 
-async def check_node_status_changes(nodes: List[Dict[str, Any]]):
-    """Проверка изменений статуса нод и отправка уведомлений"""
-    if not TELEGRAM_ENABLED or not redis_client:
+async def save_node_ids_to_redis(node_ids):
+    """Сохраняет список ID нод в Redis"""
+    if not redis_client:
+        return
+    try:
+        await redis_client.delete("marzban:node_ids")
+        if node_ids:
+            await redis_client.sadd("marzban:node_ids", *node_ids)
+    except Exception as e:
+        print(f"Ошибка сохранения ID нод в Redis: {e}")
+
+async def get_node_ids_from_redis():
+    """Получает список ID нод из Redis"""
+    if not redis_client:
+        return set()
+    try:
+        node_ids = await redis_client.smembers("marzban:node_ids")
+        return {node_id.decode('utf-8') for node_id in node_ids} if node_ids else set()
+    except Exception as e:
+        print(f"Ошибка получения ID нод из Redis: {e}")
+        return set()
+
+async def check_nodes_changes(nodes):
+    """Отслеживает добавление/удаление нод"""
+    current_node_ids = {str(n.get("id")) for n in nodes if n.get("id") is not None}
+    previous_node_ids = await get_node_ids_from_redis()
+    
+    if not previous_node_ids:
+        await save_node_ids_to_redis(current_node_ids)
         return
     
+    # Проверяем новые ноды
+    new_nodes = current_node_ids - previous_node_ids
+    for node_id in new_nodes:
+        node = next((n for n in nodes if str(n.get("id")) == node_id), None)
+        if node:
+            node_name = node.get("name") or node.get("address") or f"Node {node_id}"
+            message = f"🆕 <b>Обнаружена новая нода:</b> {node_name}"
+            await send_telegram_message(message)
+    
+    # Проверяем удаленные ноды
+    removed_nodes = previous_node_ids - current_node_ids
+    if removed_nodes:
+        message = f"❌ <b>Удалено нод:</b> {len(removed_nodes)}"
+        if len(removed_nodes) <= 5:  # Если немного нод, показываем их ID
+            message += "\nID удаленных нод: " + ", ".join(removed_nodes)
+        await send_telegram_message(message)
+    
+    # Сохраняем текущий список нод
+    if new_nodes or removed_nodes:
+        await save_node_ids_to_redis(current_node_ids)
+
+async def send_startup_notification(nodes):
+    """Отправляет уведомление о запуске мониторинга"""
+    online_nodes = sum(1 for n in nodes if n.get("status") == "connected")
+    total_nodes = len(nodes)
+    
+    message = f"🚀 <b>Мониторинг Marzban запущен</b>\n\n"
+    message += f"Всего нод: {total_nodes}\n"
+    message += f"Онлайн нод: {online_nodes}\n"
+    
+    if total_nodes > 0:
+        offline_nodes = [n.get("name") or n.get("address") or f"Node {n.get('id')}" 
+                         for n in nodes if n.get("status") != "connected"]
+        if offline_nodes:
+            message += f"\nНедоступные ноды ({len(offline_nodes)}):\n"
+            message += "\n".join([f"- {name}" for name in offline_nodes[:5]])
+            if len(offline_nodes) > 5:
+                message += f"\n...и ещё {len(offline_nodes) - 5}"
+    
+    await send_telegram_message(message)
+
+async def check_node_status_changes(nodes):
+    """Проверка изменений статуса нод и отправка уведомлений"""
     for node in nodes:
         node_id = node.get("id")
         if not node_id:
@@ -101,26 +165,20 @@ async def check_node_status_changes(nodes: List[Dict[str, Any]]):
         if previous_status is not None and previous_status != current_status:
             node_name = node.get("name") or node.get("address") or f"Node {node_id}"
             
-            # Если нода стала недоступной
             if current_status != "connected" and previous_status == "connected":
                 message = f"⚠️ <b>Нода недоступна:</b> {node_name}\n"
                 message += f"Текущий статус: {current_status}"
                 await send_telegram_message(message)
                 await set_node_last_notified(node_id)
                 
-            # Если нода стала доступна
             elif current_status == "connected" and previous_status != "connected":
                 message = f"✅ <b>Нода снова доступна:</b> {node_name}"
                 await send_telegram_message(message)
                 
-        # Сохраняем текущий статус
         await save_node_status_to_redis(node_id, current_status)
 
-async def check_offline_nodes_reminders(nodes: List[Dict[str, Any]]):
+async def check_offline_nodes_reminders(nodes):
     """Напоминания о нодах, которые долго остаются недоступными"""
-    if not TELEGRAM_ENABLED or not redis_client:
-        return
-        
     current_time = datetime.utcnow().timestamp()
     reminder_interval_seconds = NODE_REMINDER_INTERVAL * 3600
     
@@ -131,11 +189,9 @@ async def check_offline_nodes_reminders(nodes: List[Dict[str, Any]]):
             
         current_status = node.get("status")
         
-        # Если нода не подключена, проверяем, нужно ли напомнить о ней
         if current_status != "connected":
             last_notified = await get_node_last_notified(node_id)
             
-            # Если давно не уведомляли (или вообще не уведомляли)
             if last_notified is None or (current_time - last_notified) > reminder_interval_seconds:
                 node_name = node.get("name") or node.get("address") or f"Node {node_id}"
                 hours_offline = "неизвестно"
@@ -148,3 +204,25 @@ async def check_offline_nodes_reminders(nodes: List[Dict[str, Any]]):
                 
                 await send_telegram_message(message)
                 await set_node_last_notified(node_id)
+
+async def process_notifications(nodes, is_first_run=False):
+    """Обрабатывает все уведомления для нод"""
+    if not TELEGRAM_ENABLED:
+        return
+        
+    if not redis_client:
+        if not await init_redis():
+            return
+            
+    # Отправляем уведомление о запуске при первом запуске
+    if is_first_run:
+        await send_startup_notification(nodes)
+        
+    # Проверяем изменения статуса нод
+    await check_node_status_changes(nodes)
+    
+    # Отправляем напоминания о недоступных нодах
+    await check_offline_nodes_reminders(nodes)
+    
+    # Проверяем добавление/удаление нод
+    await check_nodes_changes(nodes)

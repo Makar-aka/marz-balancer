@@ -1,4 +1,3 @@
-import os
 import time
 import asyncio
 import subprocess
@@ -8,157 +7,19 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 
 import aiohttp
-import redis.asyncio as redis
-from dotenv import load_dotenv
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
-load_dotenv()
+# Импорт конфигурации и модуля telegram-уведомлений
+from config import (
+    MARZBAN_URL, MARZBAN_ADMIN_USER, MARZBAN_ADMIN_PASS, 
+    POLL_INTERVAL, APP_PORT, IP_AGENT_PORT, IP_AGENT_SCHEME,
+    MONITOR_PORT, TELEGRAM_ENABLED, NODE_CANDIDATE_PATHS,
+    stats, _token_cache
+)
+from telegram_notify import process_notifications
 
-MARZBAN_URL = os.getenv("MARZBAN_URL", "").rstrip("/")
-MARZBAN_ADMIN_USER = os.getenv("MARZBAN_ADMIN_USER", "")
-MARZBAN_ADMIN_PASS = os.getenv("MARZBAN_ADMIN_PASS", "")
-POLL_INTERVAL = float(os.getenv("POLL_INTERVAL", "5"))
-APP_PORT = int(os.getenv("APP_PORT", "8023"))
-IP_AGENT_PORT = os.getenv("IP_AGENT_PORT", "").strip()
-IP_AGENT_SCHEME = os.getenv("IP_AGENT_SCHEME", "http").strip()
-TELEGRAM_ENABLED = os.getenv("TELEGRAM_ENABLED", "false").lower() in ("true", "1", "yes")
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
-REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-NODE_REMINDER_INTERVAL = int(os.getenv("NODE_REMINDER_INTERVAL", "6"))
-
-MONITOR_PORT = int(os.getenv("MONITOR_PORT", "8443"))
-
-NODE_CANDIDATE_PATHS = [
-    "/connections",
-    "/clients",
-    "/status",
-]
-
-stats: Dict[str, Any] = {
-    "nodes": [],
-    "last_update": None,
-    "error": None,
-    "system": None,
-    "nodes_usage": None,
-    "users_usage": None,
-    "port_8443": {"unique_clients": 0, "clients": []},
-}
-_token_cache: Dict[str, Any] = {"token": None, "fetched_at": 0, "ttl": 300}
-redis_client = None
-
-async def init_redis():
-    global redis_client
-    if REDIS_URL:
-        try:
-            redis_client = await redis.from_url(REDIS_URL)
-            return True
-        except Exception as e:
-            print(f"Ошибка подключения к Redis: {e}")
-    return False
-
-async def send_telegram_message(message):
-    if not TELEGRAM_ENABLED or not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        return
-    try:
-        async with aiohttp.ClientSession() as session:
-            api_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-            payload = {
-                "chat_id": TELEGRAM_CHAT_ID,
-                "text": message,
-                "parse_mode": "HTML"
-            }
-            async with session.post(api_url, json=payload) as response:
-                return await response.json()
-    except Exception as e:
-        print(f"Ошибка отправки в Telegram: {e}")
-
-async def get_node_status_from_redis(node_id):
-    if not redis_client:
-        return None
-    try:
-        status = await redis_client.get(f"node:{node_id}:status")
-        return status.decode('utf-8') if status else None
-    except Exception:
-        return None
-
-async def save_node_status_to_redis(node_id, status):
-    if not redis_client:
-        return
-    try:
-        await redis_client.set(f"node:{node_id}:status", status)
-    except Exception:
-        pass
-
-async def set_node_last_notified(node_id):
-    if not redis_client:
-        return
-    try:
-        current_time = datetime.utcnow().timestamp()
-        await redis_client.set(f"node:{node_id}:last_notified", str(current_time))
-    except Exception:
-        pass
-
-async def get_node_last_notified(node_id):
-    if not redis_client:
-        return None
-    try:
-        result = await redis_client.get(f"node:{node_id}:last_notified")
-        return float(result) if result else None
-    except Exception:
-        return None
-
-async def check_node_status_changes(nodes):
-    for node in nodes:
-        node_id = node.get("id")
-        if not node_id:
-            continue
-            
-        current_status = node.get("status")
-        previous_status = await get_node_status_from_redis(node_id)
-        
-        if previous_status is not None and previous_status != current_status:
-            node_name = node.get("name") or node.get("address") or f"Node {node_id}"
-            
-            if current_status != "connected" and previous_status == "connected":
-                message = f"⚠️ <b>Нода недоступна:</b> {node_name}\n"
-                message += f"Текущий статус: {current_status}"
-                await send_telegram_message(message)
-                await set_node_last_notified(node_id)
-                
-            elif current_status == "connected" and previous_status != "connected":
-                message = f"✅ <b>Нода снова доступна:</b> {node_name}"
-                await send_telegram_message(message)
-                
-        await save_node_status_to_redis(node_id, current_status)
-
-async def check_offline_nodes_reminders(nodes):
-    current_time = datetime.utcnow().timestamp()
-    reminder_interval_seconds = NODE_REMINDER_INTERVAL * 3600
-    
-    for node in nodes:
-        node_id = node.get("id")
-        if not node_id:
-            continue
-            
-        current_status = node.get("status")
-        
-        if current_status != "connected":
-            last_notified = await get_node_last_notified(node_id)
-            
-            if last_notified is None or (current_time - last_notified) > reminder_interval_seconds:
-                node_name = node.get("name") or node.get("address") or f"Node {node_id}"
-                hours_offline = "неизвестно"
-                if last_notified:
-                    hours = (current_time - last_notified) / 3600
-                    hours_offline = f"{hours:.1f}"
-                    
-                message = f"⚠️ <b>Напоминание:</b> Нода {node_name} остаётся недоступной {hours_offline} часов\n"
-                message += f"Статус: {current_status}"
-                
-                await send_telegram_message(message)
-                await set_node_last_notified(node_id)
+first_run = True
 
 async def _fetch_token(session: aiohttp.ClientSession) -> Optional[str]:
     if not MARZBAN_URL or not MARZBAN_ADMIN_USER or not MARZBAN_ADMIN_PASS:
@@ -372,8 +233,7 @@ async def fetch_node_clients(session: aiohttp.ClientSession, node: Dict[str, Any
     return result
 
 def get_unique_remote_ips(port: int) -> List[str]:
-
-        return []
+    return []
 
 def _parse_ss_output_for_remote_ips(output: str) -> List[str]:
     ips = set()
@@ -392,7 +252,7 @@ def _parse_ss_output_for_remote_ips(output: str) -> List[str]:
     return list(ips)
 
 async def poll_loop():
-    await init_redis()
+    global first_run
     async with aiohttp.ClientSession() as session:
         while True:
             try:
@@ -459,9 +319,12 @@ async def poll_loop():
                     if res.get("meta") is not None:
                         node_entries[i]["clients_meta"] = res.get("meta")
 
-                if TELEGRAM_ENABLED and redis_client:
-                    await check_node_status_changes(node_entries)
-                    await check_offline_nodes_reminders(node_entries)
+                # Обрабатываем уведомления через модуль telegram_notify
+                if TELEGRAM_ENABLED:
+                    is_first_time = first_run
+                    if first_run:
+                        first_run = False
+                    await process_notifications(node_entries, is_first_time)
 
                 stats["nodes"] = node_entries
                 stats["port_8443"] = {"unique_clients": 0, "clients": []}
