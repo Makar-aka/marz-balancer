@@ -389,7 +389,7 @@ async def poll_loop():
                     }
                     node_entries.append(entry)
                 
-                save_node_stats(node_entries)
+              
                 stats["users_usage"] = users_usage
 
                 
@@ -426,7 +426,7 @@ async def poll_loop():
                         node_entries[i]["clients_meta"] = res.get("meta")
 
                 stats["nodes"] = node_entries
-
+                save_node_stats(node_entries)
                 # get unique remote IPs to MONITOR_PORT without blocking loop (local fallback)
                 try:
                     unique_ips = await asyncio.to_thread(get_unique_remote_ips, MONITOR_PORT)
