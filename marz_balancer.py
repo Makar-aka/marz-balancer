@@ -6,7 +6,6 @@ import re
 from typing import Dict, Any, Optional, List
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
-import threading
 
 import aiohttp
 from dotenv import load_dotenv
@@ -31,9 +30,6 @@ NODE_CANDIDATE_PATHS = [
     "/status",
 ]
 
-# --- Новая настройка для DPI-модуля ---
-TORRENT_DPI_ENABLED = os.getenv("TORRENT_DPI_ENABLED", "0") == "1"
-
 # runtime state
 stats: Dict[str, Any] = {
     "nodes": [],
@@ -43,7 +39,6 @@ stats: Dict[str, Any] = {
     "nodes_usage": None,
     "users_usage": None,
     "port_8443": {"unique_clients": 0, "clients": []},
-    "torrent_alerts": [],  # <--- уведомления о торрентах
 }
 _token_cache: Dict[str, Any] = {"token": None, "fetched_at": 0, "ttl": 300}
 
@@ -273,48 +268,6 @@ def _parse_ss_output_for_remote_ips(output: str) -> List[str]:
             ip = m.group(1)
             ips.add(ip)
 
-# --- DPI-модуль на scapy ---
-def _torrent_signature(payload: bytes) -> bool:
-    signatures = [
-        b"BitTorrent protocol",
-        b"announce",
-        b"info_hash",
-        b"peer_id",
-        b"get_peers",
-        b"find_node",
-        b"BitComet",
-        b"BitLord",
-        b"Azureus",
-        b"Utorrent",
-        b"Transmission",
-    ]
-    return any(sig in payload for sig in signatures)
-
-def _dpi_sniffer_worker(alerts_list: List[Dict[str, str]], stop_event: threading.Event):
-    if sniff is None:
-        return
-    def process(pkt):
-        if pkt.haslayer(Raw) and pkt.haslayer(TCP):
-            payload = pkt[Raw].load
-            if _torrent_signature(payload):
-                src = pkt[0][1].src if hasattr(pkt[0][1], 'src') else "unknown"
-                dst = pkt[0][1].dst if hasattr(pkt[0][1], 'dst') else "unknown"
-                alert = {
-                    "ip": src,
-                    "dst": dst,
-                    "time": time.strftime("%Y-%m-%d %H:%M:%S"),
-                    "desc": "Обнаружен BitTorrent-трафик"
-                }
-                if alert not in alerts_list:
-                    alerts_list.append(alert)
-                    if len(alerts_list) > 20:
-                        del alerts_list[0]
-    while not stop_event.is_set():
-        try:
-            sniff(filter="tcp", prn=process, store=0, timeout=5)
-        except Exception:
-            time.sleep(1)
-
 async def poll_loop():
     async with aiohttp.ClientSession() as session:
         while True:
@@ -406,7 +359,6 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
-        
         task.cancel()
         try:
             await task
@@ -502,7 +454,6 @@ async def index(request: Request):
 <body class="bg-light">
 <div class="container py-4">
     <h1 class="mb-4">Marzban — Ноды</h1>
-    {torrent_html}
     {header}
     <div style="color:#b00">{err or ''}</div>
     <div class="row row-cols-1 row-cols-md-2 row-cols-lg-3 g-4">
