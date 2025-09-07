@@ -104,7 +104,7 @@ async def poll_loop():
             except Exception as ex:
                 stats["error"] = str(ex)
             await asyncio.sleep(POLL_INTERVAL)
-
+print("Отладка: nodes =", nodes)
 # Fetch nodes
 async def _fetch_nodes(session: aiohttp.ClientSession, token: Optional[str]) -> Optional[List[Dict[str, Any]]]:
     if not MARZBAN_URL:
@@ -149,6 +149,7 @@ async def index(request: Request):
         datetime.fromtimestamp(last_update).strftime("%Y-%m-%d %H:%M:%S")
         if last_update
         else "—"
+print("Отладка: stats['nodes'] =", stats["nodes"]) 
     )
 
     html = f"""
