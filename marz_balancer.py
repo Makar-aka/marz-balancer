@@ -470,7 +470,6 @@ async def index(request: Request):
     header = f"""
     <div class="mb-3 d-flex flex-wrap align-items-center">
         <span class="badge bg-secondary">Последнее обновление: {last_str}</span>
-        <span class="badge bg-info text-dark ms-2">Подключений к порту {MONITOR_PORT}: {port_info.get('unique_clients', '—')}</span>
     </div>
     """
     if system:
