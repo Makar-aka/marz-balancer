@@ -1,3 +1,4 @@
+# marz_balancer.py
 import os
 import time
 import asyncio
@@ -19,13 +20,14 @@ MARZBAN_ADMIN_PASS = os.getenv("MARZBAN_ADMIN_PASS", "")
 POLL_INTERVAL = float(os.getenv("POLL_INTERVAL", "5"))
 APP_PORT = int(os.getenv("APP_PORT", "8023"))
 IP_AGENT_PORT = os.getenv("IP_AGENT_PORT", "").strip()
+# схема для ip_agent (по умолчанию http)
+IP_AGENT_SCHEME = os.getenv("IP_AGENT_SCHEME", "http").strip()
 
 # port to monitor for unique client IPs
 MONITOR_PORT = int(os.getenv("MONITOR_PORT", "8443"))
 
 # candidate node endpoints to try for live clients
-# Оставляем только необходимые пути — ваш микросервис (/connections),
-# плюс запасные /clients и /status для совместимости.
+# Оставляем только необходимые пути — приоритет: /connections (ip_agent), затем запасные /clients и /status
 NODE_CANDIDATE_PATHS = [
     "/connections",
     "/clients",
@@ -214,9 +216,54 @@ def _normalize_node_response(data: Any) -> Dict[str, Any]:
     return {"count": count, "clients": clients}
 
 
+def _build_ip_agent_base(node: Dict[str, Any]) -> Optional[str]:
+    """
+    Построить базовый URL до ip_agent для конкретной ноды.
+    Приоритет:
+     - если node.address содержит схему, использовать её и IP_AGENT_PORT (если указан)
+     - иначе использовать IP_AGENT_SCHEME и IP_AGENT_PORT
+    Возвращает строку типа "http://host:port" или None при отсутствии адреса.
+    """
+    addr = node.get("address") or node.get("name") or ""
+    if not addr:
+        return None
+    # если адрес содержит схему, используем её
+    if addr.startswith("http://") or addr.startswith("https://"):
+        # если в адресе нет порта — добавить IP_AGENT_PORT если есть
+        host_part = addr.rstrip("/")
+        if ":" not in host_part.split("://", 1)[1] and IP_AGENT_PORT:
+            return f"{host_part}:{IP_AGENT_PORT}"
+        return host_part
+    # без схемы
+    port = IP_AGENT_PORT or node.get("api_port")
+    scheme = IP_AGENT_SCHEME or "http"
+    if port:
+        return f"{scheme}://{addr}:{port}"
+    return f"{scheme}://{addr}"
+
+
 async def fetch_node_clients(session: aiohttp.ClientSession, node: Dict[str, Any]) -> Dict[str, Any]:
-    base = _build_node_base(node)
+    """
+    Сначала явно пробует ip_agent /connections по предопределённому порту (IP_AGENT_PORT),
+    затем — fallback на стандартную логику перебора NODE_CANDIDATE_PATHS.
+    """
     result = {"count": 0, "clients": [], "detected_path": None, "error": None}
+    base_ip_agent = _build_ip_agent_base(node)
+    # попытка напрямую опросить ip_agent /connections первым
+    if base_ip_agent:
+        res = await _try_node_path(session, base_ip_agent, "/connections", timeout_s=5)
+        if res is not None and not (isinstance(res, dict) and res.get("error")):
+            norm = _normalize_node_response(res)
+            if norm.get("count", 0) > 0 or len(norm.get("clients", [])) > 0 or isinstance(res, (list, dict)):
+                # attach meta/port if present
+                if isinstance(norm, dict) and "meta" in norm:
+                    result["meta"] = norm["meta"]
+                if isinstance(norm, dict) and "port" in norm:
+                    result["port"] = norm["port"]
+                result.update({"count": norm.get("count", 0), "clients": norm.get("clients", []), "detected_path": f"{base_ip_agent}/connections"})
+                return result
+    # fallback: старая логика с перебором путей
+    base = _build_node_base(node)
     if not base:
         result["error"] = "no base address"
         return result
@@ -236,9 +283,7 @@ async def fetch_node_clients(session: aiohttp.ClientSession, node: Dict[str, Any
         if isinstance(res, dict) and res.get("error"):
             continue
         norm = _normalize_node_response(res)
-        # accept responses that contain clients list or count
         if norm.get("count", 0) > 0 or len(norm.get("clients", [])) > 0 or isinstance(res, (list, dict)):
-            # attach raw meta fields if available (e.g. port / trusted)
             if isinstance(norm, dict) and "meta" in norm:
                 result["meta"] = norm["meta"]
             if isinstance(norm, dict) and "port" in norm:
