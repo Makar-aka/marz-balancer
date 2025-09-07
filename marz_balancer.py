@@ -372,12 +372,7 @@ async def fetch_node_clients(session: aiohttp.ClientSession, node: Dict[str, Any
     return result
 
 def get_unique_remote_ips(port: int) -> List[str]:
-    try:
-        cmd = ["ss", "-n", "-t", "state", "established", f"sport = {port}"]
-        output = subprocess.check_output(cmd, text=True)
-        return _parse_ss_output_for_remote_ips(output)
-    except Exception as ex:
-        print(f"Ошибка получения удалённых IP: {ex}")
+
         return []
 
 def _parse_ss_output_for_remote_ips(output: str) -> List[str]:
@@ -469,13 +464,7 @@ async def poll_loop():
                     await check_offline_nodes_reminders(node_entries)
 
                 stats["nodes"] = node_entries
-
-                try:
-                    unique_ips = await asyncio.to_thread(get_unique_remote_ips, MONITOR_PORT)
-                    stats["port_8443"] = {"unique_clients": len(unique_ips), "clients": unique_ips[:200]}
-                except Exception:
-                    stats["port_8443"] = {"unique_clients": 0, "clients": []}
-
+                stats["port_8443"] = {"unique_clients": 0, "clients": []}
                 stats["error"] = None
                 stats["last_update"] = time.time()
             except Exception as ex:
