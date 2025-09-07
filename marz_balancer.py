@@ -483,6 +483,30 @@ APP = FastAPI(lifespan=lifespan)
 async def api_stats():
     return JSONResponse(content=stats)
 
+@APP.get("/users_graph", response_class=HTMLResponse)
+async def users_graph_page(request: Request):
+    html = """
+    <!doctype html>
+    <html lang="ru">
+    <head>
+        <meta charset="utf-8">
+        <title>График пользователей по нодам</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    </head>
+    <body class="bg-light">
+    <div class="container py-4">
+        <h1 class="mb-4">График пользователей по нодам</h1>
+        <div class="mb-4">
+            <img src="/users_graph.png?ts={0}" class="img-fluid border" alt="График пользователей">
+        </div>
+        <a href="/" class="btn btn-secondary">Назад к нодам</a>
+    </div>
+    </body>
+    </html>
+    """.format(int(time.time()))
+    return HTMLResponse(content=html)
+
 @APP.get("/users_graph.png")
 async def users_graph():
     with sqlite3.connect(DB_PATH) as conn:
@@ -551,10 +575,6 @@ async def index(request: Request):
                     {"<div class='alert alert-danger mt-2'>Clients error: " + n.get('clients_error') + "</div>" if n.get('clients_error') else ""}
                 </div>
             </div>
-        </div>
-        <div class="mb-4">
-            <h5>График количества пользователей по нодам</h5>
-            <img src="/users_graph.png?{{ last_str }}" class="img-fluid" alt="График пользователей">
         </div>
         """
     if not items:
