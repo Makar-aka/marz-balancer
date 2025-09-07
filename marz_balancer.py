@@ -159,6 +159,7 @@ def init_db():
             )
         """)
         conn.commit()
+init_db() 
 
 def save_node_stats(nodes):
     ts = int(time.time())
@@ -545,6 +546,7 @@ async def index(request: Request):
     header = f"""
     <div class="mb-3 d-flex flex-wrap align-items-center">
         <span class="badge bg-secondary">Последнее обновление: {last_str}</span>
+        <a href="/users_graph" class="btn btn-outline-primary btn-sm ms-3">График пользователей</a>
     </div>
     """
     if system:
