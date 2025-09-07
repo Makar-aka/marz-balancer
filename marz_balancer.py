@@ -633,7 +633,7 @@ async def users_graph_interactive(request: Request, period: str = "1d", interval
                     Plotly.react('users-plot', plot_data.data, plot_data.layout, {{responsive: true}});
                 }}
             }});
-        }}, 30000); // 30 секунд
+        }}, 10000); // 10 секунд
     </script>
     </body>
     </html>
