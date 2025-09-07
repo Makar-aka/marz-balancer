@@ -153,23 +153,44 @@ def init_db():
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute("""
-            CREATE TABLE IF NOT EXISTS node_users (
-                ts INTEGER,
-                node_name TEXT,
-                users_count INTEGER
+            CREATE TABLE IF NOT EXISTS nodes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                address TEXT,
+                api_port INTEGER
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS node_metrics (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                node_id INTEGER NOT NULL,
+                timestamp DATETIME NOT NULL,
+                users_count INTEGER NOT NULL,
+                FOREIGN KEY (node_id) REFERENCES nodes (id)
             )
         """)
         conn.commit()
 init_db() 
 
 def save_node_stats(nodes):
-    ts = int(time.time())
+    ts = datetime.utcnow().isoformat()
     with sqlite3.connect(DB_PATH) as conn:
         for n in nodes:
-            conn.execute(
-                "INSERT INTO node_users (ts, node_name, users_count) VALUES (?, ?, ?)",
-                (ts, n.get('name') or n.get('address'), n.get('clients_count') or 0)
-            )
+            # Вставляем или обновляем ноду
+            conn.execute("""
+                INSERT INTO nodes (name, address, api_port)
+                VALUES (?, ?, ?)
+                ON CONFLICT(name) DO UPDATE SET address=excluded.address, api_port=excluded.api_port
+            """, (n.get('name'), n.get('address'), n.get('api_port')))
+            
+            # Получаем ID ноды
+            node_id = conn.execute("SELECT id FROM nodes WHERE name = ?", (n.get('name'),)).fetchone()[0]
+            
+            # Вставляем метрику
+            conn.execute("""
+                INSERT INTO node_metrics (node_id, timestamp, users_count)
+                VALUES (?, ?, ?)
+            """, (node_id, ts, n.get('clients_count') or 0))
         conn.commit()
 
 def _build_node_base(node: Dict[str, Any]) -> str:
@@ -490,104 +511,38 @@ async def api_stats():
     return JSONResponse(content=stats)
 
 @APP.get("/users_graph_interactive", response_class=HTMLResponse)
-async def users_graph_interactive(request: Request, period: str = "1d", interval: Optional[str] = None):
-    # Автоматический выбор интервала по периоду, если не задан явно
-    period = period or "1d"
-    interval_options = {
-        "1d": [("5min", "5 минут"), ("10min", "10 минут"), ("30min", "30 минут"), ("1h", "1 час")],
-        "1w": [("30min", "30 минут"), ("1h", "1 час"), ("3h", "3 часа"), ("6h", "6 часов")],
-        "1m": [("1h", "1 час"), ("3h", "3 часа"), ("6h", "6 часов"), ("12h", "12 часов"), ("1d", "1 день")],
-    }
-    default_interval = {
-        "1d": "10min",
-        "1w": "1h",
-        "1m": "6h"
-    }.get(period, "10min")
-    # Если пользователь не выбрал интервал — подставляем дефолт
-    interval = interval or request.query_params.get("interval") or default_interval
-    # Проверяем, что выбранный интервал есть в списке для текущего периода
-    valid_intervals = [opt[0] for opt in interval_options.get(period, [("10min", "10 минут")])]
-    if interval not in valid_intervals:
-        interval = default_interval
-
-    now = int(time.time())
+async def users_graph_interactive(request: Request, period: str = "1d"):
+    now = datetime.utcnow()
     if period == "1d":
-        start_ts = now - 86400
+        start_time = now - timedelta(days=1)
     elif period == "1w":
-        start_ts = now - 7 * 86400
+        start_time = now - timedelta(weeks=1)
     elif period == "1m":
-        start_ts = now - 30 * 86400
+        start_time = now - timedelta(days=30)
     else:
-        start_ts = now - 86400
+        start_time = now - timedelta(days=1)
 
     with sqlite3.connect(DB_PATH) as conn:
-        df = pd.read_sql_query(
-            "SELECT ts, node_name, users_count FROM node_users WHERE ts >= ?",
-            conn,
-            params=(start_ts,)
-        )
+        query = """
+            SELECT n.name, m.timestamp, m.users_count
+            FROM node_metrics m
+            JOIN nodes n ON m.node_id = n.id
+            WHERE m.timestamp >= ?
+            ORDER BY m.timestamp
+        """
+        df = pd.read_sql_query(query, conn, params=(start_time.isoformat(),))
+
     if df.empty:
         return HTMLResponse("<h3>Нет данных для графика</h3>")
 
-    df['dt'] = pd.to_datetime(df['ts'], unit='s')
-    df['users_count'] = df['users_count'].astype(int)
-    df.set_index('dt', inplace=True)
+    # Создаём график
+    p = figure(title="Пользователи по нодам", x_axis_type="datetime", height=400, sizing_mode="stretch_width")
+    for node_name in df['name'].unique():
+        node_data = df[df['name'] == node_name]
+        p.line(pd.to_datetime(node_data['timestamp']), node_data['users_count'], legend_label=node_name)
 
-    # Группируем по node_name и dt, чтобы избежать дублирования данных
-    df_grouped = df.groupby(['node_name', 'dt'], as_index=False)['users_count'].max()
-
-    data = []
-    print("Отладка: df_grouped.head()")
-    print(df_grouped.head())  # Проверяем содержимое df_grouped
-
-    for node in sorted(df_grouped['node_name'].unique()):
-        node_df = df_grouped[df_grouped['node_name'] == node].copy()
-    
-        # Проверяем, существуют ли данные для ноды
-        if node_df.empty:
-            raise ValueError(f"Нет данных для ноды {node}")
-    
-        # Проверяем, существует ли колонка 'dt'
-        if 'dt' not in node_df.columns:
-            raise ValueError(f"Колонка 'dt' отсутствует в данных для ноды {node}")
-    
-        # Устанавливаем индекс и выполняем ресемплинг
-        node_df = node_df.set_index('dt').resample(interval).max()
-        node_df = node_df.sort_index()
-    
-        data.append(go.Scatter(
-            x=node_df.index,
-            y=node_df['users_count'],  # Указываем колонку явно
-            mode='lines+markers',
-            name=node,
-            line=dict(width=2)
-        ))
-
-    layout = go.Layout(
-        title="Пользователи по нодам",
-        xaxis=dict(title="Время"),
-        yaxis=dict(title="Пользователей", dtick=1, tickformat="d"),
-        hovermode="x unified",
-        legend=dict(orientation="h"),
-        template="plotly_white",
-        margin=dict(l=40, r=20, t=40, b=40)
-    )
-    fig = go.Figure(data=data, layout=layout)
-    fig.update_yaxes(tickformat="d")  # Только целые числа
-
-    # Формируем выпадающий список интервалов
-    interval_select = "".join(
-        f'<option value="{val}" {"selected" if interval==val else ""}>{label}</option>'
-        for val, label in interval_options.get(period, [("10min", "10 минут")])
-    )
-
-    # Пояснение для пользователя
-    interval_hint = (
-        '<div class="alert alert-info py-2 px-3 mb-3" style="font-size:0.95em">'
-        'Интервал — это шаг агрегации данных на графике. Например, "1 час" означает, что для каждого часа отображается максимальное количество пользователей на ноде за этот час.<br>'
-        'Если данных мало, выбирайте более крупный интервал для наглядности.'
-        '</div>'
-    )
+    p.legend.click_policy = "hide"
+    script, div = components(p)
 
     html = f"""
     <!doctype html>
@@ -595,62 +550,13 @@ async def users_graph_interactive(request: Request, period: str = "1d", interval
     <head>
         <meta charset="utf-8">
         <title>График пользователей по нодам</title>
-        <meta name="viewport" content="width=device-width, initial-scale=1">
-        <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
-        <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+        <link href="https://cdn.bokeh.org/bokeh/release/bokeh-2.4.3.min.css" rel="stylesheet">
+        <script src="https://cdn.bokeh.org/bokeh/release/bokeh-2.4.3.min.js"></script>
     </head>
-    <body class="bg-light">
-    <div class="container py-4">
-        <h1 class="mb-4">График пользователей по нодам</h1>
-        {interval_hint}
-        <form method="get" class="mb-3">
-            <div class="row g-2 align-items-center">
-                <div class="col-auto">
-                    <label for="period" class="form-label mb-0">Период:</label>
-                </div>
-                <div class="col-auto">
-                    <select name="period" id="period" class="form-select form-select-sm" onchange="this.form.submit()">
-                        <option value="1d" {'selected' if period=='1d' else ''}>День</option>
-                        <option value="1w" {'selected' if period=='1w' else ''}>Неделя</option>
-                        <option value="1m" {'selected' if period=='1m' else ''}>Месяц</option>
-                    </select>
-                </div>
-                <div class="col-auto">
-                    <label for="interval" class="form-label mb-0">Интервал:</label>
-                </div>
-                <div class="col-auto">
-                    <select name="interval" id="interval" class="form-select form-select-sm" onchange="this.form.submit()">
-                        {interval_select}
-                    </select>
-                </div>
-            </div>
-        </form>
-        <div id="users-plot"></div>
-        <a href="/" class="btn btn-secondary mt-3">Назад к нодам</a>
-    </div>
-    <script id="plotly-data" type="application/json">{fig.to_json()}</script>
-    <script>
-        // Первичная отрисовка
-        var plot_data = JSON.parse(document.getElementById('plotly-data').textContent);
-        Plotly.newPlot('users-plot', plot_data.data, plot_data.layout, {{responsive: true}});
-
-        // Автообновление графика каждые 30 секунд
-        setInterval(function() {{
-            fetch(window.location.pathname + window.location.search, {{
-                headers: {{'X-Requested-With': 'XMLHttpRequest'}}
-            }})
-            .then(resp => resp.text())
-            .then(html => {{
-                var parser = new DOMParser();
-                var doc = parser.parseFromString(html, 'text/html');
-                var newData = doc.querySelector('#plotly-data');
-                if (newData) {{
-                    var plot_data = JSON.parse(newData.textContent);
-                    Plotly.react('users-plot', plot_data.data, plot_data.layout, {{responsive: true}});
-                }}
-            }});
-        }}, 10000); // 10 секунд
-    </script>
+    <body>
+        <h1>График пользователей по нодам</h1>
+        {div}
+        {script}
     </body>
     </html>
     """
