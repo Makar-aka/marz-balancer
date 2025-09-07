@@ -537,8 +537,15 @@ async def users_graph_interactive(request: Request, period: str = "1d", interval
     df_grouped = df.groupby(['node_name', 'dt'], as_index=False)['users_count'].max()
 
     data = []
+    print("Отладка: df_grouped.head()")
+    print(df_grouped.head())  # Проверяем содержимое df_grouped
+
     for node in sorted(df_grouped['node_name'].unique()):
         node_df = df_grouped[df_grouped['node_name'] == node].copy()
+    
+        # Проверяем, существуют ли данные для ноды
+        if node_df.empty:
+            raise ValueError(f"Нет данных для ноды {node}")
     
         # Проверяем, существует ли колонка 'dt'
         if 'dt' not in node_df.columns:
