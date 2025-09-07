@@ -136,6 +136,59 @@ async def lifespan(app: FastAPI):
         except asyncio.CancelledError:
             pass
 
+@APP.get("/", response_class=HTMLResponse)
+async def index(request: Request):
+    nodes = stats.get("nodes", [])
+    last_update = stats.get("last_update")
+    error = stats.get("error")
+
+    last_update_str = (
+        datetime.fromtimestamp(last_update).strftime("%Y-%m-%d %H:%M:%S")
+        if last_update
+        else "—"
+    )
+
+    html = f"""
+    <!doctype html>
+    <html lang="ru">
+    <head>
+        <meta charset="utf-8">
+        <title>MarzBalancer</title>
+        <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    </head>
+    <body class="bg-light">
+        <div class="container py-4">
+            <h1 class="mb-4">MarzBalancer</h1>
+            <div class="mb-3">
+                <span class="badge bg-secondary">Последнее обновление: {last_update_str}</span>
+            </div>
+            <div style="color: red;">{error or ""}</div>
+            <h2 class="mt-4">Ноды</h2>
+            <ul class="list-group">
+    """
+    for node in nodes:
+        html += f"""
+            <li class="list-group-item">
+                <b>{node.get('name') or '—'}</b><br>
+                Адрес: {node.get('address') or '—'}<br>
+                Порт API: {node.get('api_port') or '—'}<br>
+                Клиенты: {node.get('clients_count') or '—'}
+            </li>
+        """
+    if not nodes:
+        html += "<li class='list-group-item'>Нет данных о нодах.</li>"
+
+    html += """
+            </ul>
+            <div class="mt-4">
+                <a href="/users_graph_interactive" class="btn btn-primary">График пользователей</a>
+            </div>
+        </div>
+    </body>
+    </html>
+    """
+    return HTMLResponse(content=html)
+
 # API endpoint for stats
 @APP.get("/api/stats")
 async def api_stats():
