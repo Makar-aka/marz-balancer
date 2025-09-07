@@ -426,12 +426,6 @@ async def lifespan(app: FastAPI):
         except asyncio.CancelledError:
             pass
 
-APP = FastAPI(lifespan=lifespan)
-
-@APP.get("/api/stats")
-async def api_stats():
-    return JSONResponse(content=stats)
-
 def human_bytes(num: Optional[int]) -> str:
     """Форматирует байты в человекочитаемый вид (КБ, МБ, ГБ, ТБ)."""
     if num is None:
@@ -457,16 +451,15 @@ def get_usage_range(period: str) -> tuple[Optional[str], Optional[str]]:
         return (None, None)
     return (start, now.isoformat(timespec="seconds") + "Z")
 
+APP = FastAPI(lifespan=lifespan)
+
+@APP.get("/api/stats")
+async def api_stats():
+    return JSONResponse(content=stats)
+
+
 @APP.get("/", response_class=HTMLResponse)
 async def index(request: Request):
-    period = request.query_params.get("usage_period", "all")
-    start, end = get_usage_range(period)
-
-    # Получаем usage прямо сейчас, а не из poll_loop
-    async with aiohttp.ClientSession() as session:
-        token = await _fetch_token(session)
-        nodes_usage = await _fetch_nodes_usage(session, token, start, end)
-
     nodes = stats.get("nodes", [])
     last = stats.get("last_update")
     err = stats.get("error")
@@ -474,44 +467,9 @@ async def index(request: Request):
     port_info = stats.get("port_8443", {})
     last_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(last)) if last else "—"
 
-    # Радио-кнопки для выбора периода
-    period_options = [
-        ("all", "Всё время"),
-        ("1m", "Месяц"),
-        ("1w", "Неделя"),
-        ("1d", "Сутки"),
-    ]
-    radio_html = ""
-    for val, label in period_options:
-        checked = "checked" if period == val else ""
-        radio_html += f"""
-        <input type="radio" class="btn-check" name="usage_period" id="usage_{val}" value="{val}" autocomplete="off" {checked}>
-        <label class="btn btn-outline-primary btn-sm" for="usage_{val}">{label}</label>
-        """
-
-    # Форма для выбора периода (отправляет GET с usage_period)
-    form_html = f"""
-    <form method="get" class="d-inline-block align-middle" id="usageForm" style="margin-right: 1rem;">
-        <div class="btn-group" role="group" aria-label="Выбор периода">
-            {radio_html}
-        </div>
-    </form>
-    <script>
-    // Автоматически отправлять форму при выборе периода
-    document.addEventListener('DOMContentLoaded', function() {{
-        document.querySelectorAll('input[name="usage_period"]').forEach(function(el) {{
-            el.addEventListener('change', function() {{
-                document.getElementById('usageForm').submit();
-            }});
-        }});
-    }});
-    </script>
-    """
-
     header = f"""
     <div class="mb-3 d-flex flex-wrap align-items-center">
-        {form_html}
-        <span class="badge bg-secondary ms-2">Последнее обновление: {last_str}</span>
+        <span class="badge bg-secondary">Последнее обновление: {last_str}</span>
         <span class="badge bg-info text-dark ms-2">Подключений к порту {MONITOR_PORT}: {port_info.get('unique_clients', '—')}</span>
     </div>
     """
