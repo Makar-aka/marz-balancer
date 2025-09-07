@@ -31,19 +31,32 @@ stats: Dict[str, Any] = {
 # Fetch token for authentication
 async def _fetch_token(session: aiohttp.ClientSession) -> Optional[str]:
     if not MARZBAN_URL or not MARZBAN_ADMIN_USER or not MARZBAN_ADMIN_PASS:
+        print("Переменные окружения не заданы!")
         return None
-    now = time.time()
+
     url = f"{MARZBAN_URL}/api/admin/token"
-    data = {"username": MARZBAN_ADMIN_USER, "password": MARZBAN_ADMIN_PASS}
+    data = {
+        "grant_type": None,  # Если требуется, можно указать "password" или оставить None
+        "username": MARZBAN_ADMIN_USER,
+        "password": MARZBAN_ADMIN_PASS,
+        "scope": "",
+        "client_id": None,
+        "client_secret": None,
+    }
     headers = {"Content-Type": "application/x-www-form-urlencoded"}
+
     try:
+        print(f"Отправка запроса на {url} с данными {data}")
         async with session.post(url, data=data, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+            print(f"Статус ответа: {resp.status}")
             if resp.status != 200:
+                print(f"Ошибка: {resp.status} {await resp.text()}")
                 return None
             j = await resp.json()
+            print(f"Ответ JSON: {j}")
             return j.get("access_token") or j.get("token")
     except Exception as e:
-        print("Ошибка при получении токена:", e)  # Отладочный вывод
+        print("Ошибка при получении токена:", e)
         return None
 
 # Polling loop to fetch data periodically
