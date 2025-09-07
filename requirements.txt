@@ -4,3 +4,5 @@ python-dotenv
 uvicorn
 scapy
 matplotlib
+plotly
+pandas

@@ -13,7 +13,8 @@ import aiohttp
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
-
+import pandas as pd
+import plotly.graph_objs as go
 load_dotenv()
 
 MARZBAN_URL = os.getenv("MARZBAN_URL", "").rstrip("/")
@@ -484,9 +485,59 @@ APP = FastAPI(lifespan=lifespan)
 async def api_stats():
     return JSONResponse(content=stats)
 
-@APP.get("/users_graph", response_class=HTMLResponse)
-async def users_graph_page(request: Request):
-    html = """
+@APP.get("/users_graph_interactive", response_class=HTMLResponse)
+async def users_graph_interactive(request: Request, period: str = "1d", interval: str = "10min"):
+    # period: "1d", "1w", "1m"
+    # interval: "10min", "1h"
+    now = int(time.time())
+    if period == "1d":
+        start_ts = now - 86400
+    elif period == "1w":
+        start_ts = now - 7*86400
+    elif period == "1m":
+        start_ts = now - 30*86400
+    else:
+        start_ts = now - 86400
+
+    with sqlite3.connect(DB_PATH) as conn:
+        df = pd.read_sql_query(
+            "SELECT ts, node_name, users_count FROM node_users WHERE ts >= ?",
+            conn,
+            params=(start_ts,)
+        )
+    if df.empty:
+        return HTMLResponse("<h3>Нет данных для графика</h3>")
+
+    df['dt'] = pd.to_datetime(df['ts'], unit='s')
+    df['users_count'] = df['users_count'].astype(int)
+    df.set_index('dt', inplace=True)
+
+    # Агрегация по интервалу
+    data = []
+    for node in df['node_name'].unique():
+        node_df = df[df['node_name'] == node].resample(interval).max().fillna(0)
+        data.append(go.Scatter(
+            x=node_df.index,
+            y=node_df['users_count'],
+            mode='lines+markers',
+            name=node,
+            line=dict(width=2)
+        ))
+
+    layout = go.Layout(
+        title="Пользователи по нодам",
+        xaxis=dict(title="Время"),
+        yaxis=dict(title="Пользователей", dtick=1, tickformat="d"),
+        hovermode="x unified",
+        legend=dict(orientation="h"),
+        template="plotly_white",
+        margin=dict(l=40, r=20, t=40, b=40)
+    )
+    fig = go.Figure(data=data, layout=layout)
+    fig.update_yaxes(tickformat="d")  # Только целые числа
+
+    # HTML с переключателями периода и интервала
+    html = f"""
     <!doctype html>
     <html lang="ru">
     <head>
@@ -494,18 +545,44 @@ async def users_graph_page(request: Request):
         <title>График пользователей по нодам</title>
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+        <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
     </head>
     <body class="bg-light">
     <div class="container py-4">
         <h1 class="mb-4">График пользователей по нодам</h1>
-        <div class="mb-4">
-            <img src="/users_graph.png?ts={0}" class="img-fluid border" alt="График пользователей">
-        </div>
-        <a href="/" class="btn btn-secondary">Назад к нодам</a>
+        <form method="get" class="mb-3">
+            <div class="row g-2 align-items-center">
+                <div class="col-auto">
+                    <label for="period" class="form-label mb-0">Период:</label>
+                </div>
+                <div class="col-auto">
+                    <select name="period" id="period" class="form-select form-select-sm" onchange="this.form.submit()">
+                        <option value="1d" {'selected' if period=='1d' else ''}>День</option>
+                        <option value="1w" {'selected' if period=='1w' else ''}>Неделя</option>
+                        <option value="1m" {'selected' if period=='1m' else ''}>Месяц</option>
+                    </select>
+                </div>
+                <div class="col-auto">
+                    <label for="interval" class="form-label mb-0">Интервал:</label>
+                </div>
+                <div class="col-auto">
+                    <select name="interval" id="interval" class="form-select form-select-sm" onchange="this.form.submit()">
+                        <option value="10min" {'selected' if interval=='10min' else ''}>10 минут</option>
+                        <option value="1h" {'selected' if interval=='1h' else ''}>1 час</option>
+                    </select>
+                </div>
+            </div>
+        </form>
+        <div id="users-plot"></div>
+        <a href="/" class="btn btn-secondary mt-3">Назад к нодам</a>
     </div>
+    <script>
+        var plot_data = {fig.to_json()};
+        Plotly.newPlot('users-plot', plot_data.data, plot_data.layout, {{responsive: true}});
+    </script>
     </body>
     </html>
-    """.format(int(time.time()))
+    """
     return HTMLResponse(content=html)
 
 @APP.get("/users_graph.png")
@@ -546,7 +623,7 @@ async def index(request: Request):
     header = f"""
     <div class="mb-3 d-flex flex-wrap align-items-center">
         <span class="badge bg-secondary">Последнее обновление: {last_str}</span>
-        <a href="/users_graph" class="btn btn-outline-primary btn-sm ms-3">График пользователей</a>
+        <a href="/users_graph_interactive" class="btn btn-outline-primary btn-sm ms-3">Интерактивный график</a>
     </div>
     """
     if system:
