@@ -403,13 +403,17 @@ async def api_stats():
 
 @APP.get("/", response_class=HTMLResponse)
 async def index(request: Request):
-    # ... существующий код ...
-    
+    nodes = stats.get("nodes", [])  # Эта строка отсутствовала, отсюда ошибка
+    last = stats.get("last_update")
+    err = stats.get("error")
+    system = stats.get("system")
+    port_info = stats.get("port_8443", {})
+    last_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(last)) if last else "—"
+
     # Добавим подсчет общего количества подключений
     total_clients = sum(int(n.get('clients_count') or 0) for n in nodes)
     total_connections = sum(int(n.get('count_all') or n.get('clients_count') or 0) for n in nodes)
-    
-    # Обновим заголовок, добавив общее количество подключений
+
     header = f"""
     <div class="mb-3 d-flex flex-wrap align-items-center">
         <span class="badge bg-secondary">Последнее обновление: {last_str}</span>
@@ -419,18 +423,19 @@ async def index(request: Request):
         {'<span class="badge bg-success ms-2">Telegram уведомления: включены</span>' if TELEGRAM_ENABLED else '<span class="badge bg-danger ms-2">Telegram уведомления: выключены</span>'}
     </div>
     """
-    
-    # ... существующий код ...
-    
-    # Обновим карточки нод для отображения общего количества подключений
+    if system:
+        header += f"""
+        <div class="mb-3">
+            <span class="badge bg-success">Online users (master): {system.get('online_users', '—')}</span>
+            <span class="badge bg-primary ms-2">Incoming bandwidth: {human_bytes(system.get('incoming_bandwidth'))}</span>
+            <span class="badge bg-primary ms-2">Outgoing bandwidth: {human_bytes(system.get('outgoing_bandwidth'))}</span>
+        </div>
+        """
+
     items = ""
     for n in nodes:
         count_all = n.get('count_all')
         clients_count = n.get('clients_count')
-        connections_info = ""
-        
-        if count_all is not None and count_all != clients_count:
-            connections_info = f"<b>Всего соединений:</b> {count_all}"
         
         items += f"""
         <div class="col">
