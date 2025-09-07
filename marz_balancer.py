@@ -490,16 +490,33 @@ async def api_stats():
     return JSONResponse(content=stats)
 
 @APP.get("/users_graph_interactive", response_class=HTMLResponse)
-async def users_graph_interactive(request: Request, period: str = "1d", interval: str = "10min"):
-    # period: "1d", "1w", "1m"
-    # interval: "10min", "1h"
+async def users_graph_interactive(request: Request, period: str = "1d", interval: Optional[str] = None):
+    # Автоматический выбор интервала по периоду, если не задан явно
+    period = period or "1d"
+    interval_options = {
+        "1d": [("5min", "5 минут"), ("10min", "10 минут"), ("30min", "30 минут"), ("1h", "1 час")],
+        "1w": [("30min", "30 минут"), ("1h", "1 час"), ("3h", "3 часа"), ("6h", "6 часов")],
+        "1m": [("1h", "1 час"), ("3h", "3 часа"), ("6h", "6 часов"), ("12h", "12 часов"), ("1d", "1 день")],
+    }
+    default_interval = {
+        "1d": "10min",
+        "1w": "1h",
+        "1m": "6h"
+    }.get(period, "10min")
+    # Если пользователь не выбрал интервал — подставляем дефолт
+    interval = interval or request.query_params.get("interval") or default_interval
+    # Проверяем, что выбранный интервал есть в списке для текущего периода
+    valid_intervals = [opt[0] for opt in interval_options.get(period, [("10min", "10 минут")])]
+    if interval not in valid_intervals:
+        interval = default_interval
+
     now = int(time.time())
     if period == "1d":
         start_ts = now - 86400
     elif period == "1w":
-        start_ts = now - 7*86400
+        start_ts = now - 7 * 86400
     elif period == "1m":
-        start_ts = now - 30*86400
+        start_ts = now - 30 * 86400
     else:
         start_ts = now - 86400
 
@@ -516,10 +533,13 @@ async def users_graph_interactive(request: Request, period: str = "1d", interval
     df['users_count'] = df['users_count'].astype(int)
     df.set_index('dt', inplace=True)
 
-    # Агрегация по интервалу
+    # Агрегация по интервалу и сортировка
     data = []
-    for node in df['node_name'].unique():
-        node_df = df[df['node_name'] == node].resample(interval).max().fillna(0)
+    for node in sorted(df['node_name'].unique()):
+        node_df = df[df['node_name'] == node].resample(interval).max()
+        # Если хотите видеть пропуски как NaN (без линии) — не заполняйте нулями
+        # node_df = node_df.fillna(0)
+        node_df = node_df.sort_index()
         data.append(go.Scatter(
             x=node_df.index,
             y=node_df['users_count'],
@@ -540,7 +560,20 @@ async def users_graph_interactive(request: Request, period: str = "1d", interval
     fig = go.Figure(data=data, layout=layout)
     fig.update_yaxes(tickformat="d")  # Только целые числа
 
-    # HTML с переключателями периода и интервала и автообновлением графика
+    # Формируем выпадающий список интервалов
+    interval_select = "".join(
+        f'<option value="{val}" {"selected" if interval==val else ""}>{label}</option>'
+        for val, label in interval_options.get(period, [("10min", "10 минут")])
+    )
+
+    # Пояснение для пользователя
+    interval_hint = (
+        '<div class="alert alert-info py-2 px-3 mb-3" style="font-size:0.95em">'
+        'Интервал — это шаг агрегации данных на графике. Например, "1 час" означает, что для каждого часа отображается максимальное количество пользователей на ноде за этот час.<br>'
+        'Если данных мало, выбирайте более крупный интервал для наглядности.'
+        '</div>'
+    )
+
     html = f"""
     <!doctype html>
     <html lang="ru">
@@ -554,6 +587,7 @@ async def users_graph_interactive(request: Request, period: str = "1d", interval
     <body class="bg-light">
     <div class="container py-4">
         <h1 class="mb-4">График пользователей по нодам</h1>
+        {interval_hint}
         <form method="get" class="mb-3">
             <div class="row g-2 align-items-center">
                 <div class="col-auto">
@@ -571,8 +605,7 @@ async def users_graph_interactive(request: Request, period: str = "1d", interval
                 </div>
                 <div class="col-auto">
                     <select name="interval" id="interval" class="form-select form-select-sm" onchange="this.form.submit()">
-                        <option value="10min" {'selected' if interval=='10min' else ''}>10 минут</option>
-                        <option value="1h" {'selected' if interval=='1h' else ''}>1 час</option>
+                        {interval_select}
                     </select>
                 </div>
             </div>
