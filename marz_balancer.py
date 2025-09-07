@@ -1,4 +1,3 @@
-# marz_balancer.py
 import os
 import time
 import asyncio
@@ -315,10 +314,26 @@ def _parse_ss_output_for_remote_ips(output: str) -> List[str]:
             ip = m.group(1)
             ips.add(ip)
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # start background polling task
+    if not MARZBAN_URL:
+        stats["error"] = "MARZBAN_URL not configured"
+    task = asyncio.create_task(poll_loop())
+    try:
+        yield
+    finally:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+APP = FastAPI(lifespan=lifespan)
+
 @APP.get("/api/stats")
 async def api_stats():
     return JSONResponse(content=stats)
-
 
 @APP.get("/", response_class=HTMLResponse)
 async def index():
@@ -343,7 +358,6 @@ async def index():
         items += f"Address: {n.get('address') or '—'}<br/>"
         items += f"API port: {n.get('api_port') or '—'}<br/>"
         items += f"Status: {n.get('status') or '—'}<br/>"
-        # Показываем только clients_count (число клиентов с ip_agent)
         items += f"Clients: {n.get('clients_count') if n.get('clients_count') is not None else '—'}<br/>"
         items += f"Uplink: {n.get('uplink') if n.get('uplink') is not None else '—'} Downlink: {n.get('downlink') if n.get('downlink') is not None else '—'}<br/>"
         if n.get("clients_error"):
@@ -364,8 +378,7 @@ setTimeout(()=>location.reload(), {int(POLL_INTERVAL*1000)});
 </body></html>"""
     return HTMLResponse(content=html)
 
-
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run("marz_balancer:APP", host="0.0.0.0", port=APP_PORT, reload=True)           
+    uvicorn.run("marz_balancer:APP", host="0.0.0.0", port=APP_PORT, reload=True)
