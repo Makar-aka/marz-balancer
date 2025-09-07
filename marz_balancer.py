@@ -403,10 +403,14 @@ async def index(request: Request):
     port_info = stats.get("port_8443", {})
     last_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(last)) if last else "—"
 
+    # суммарное количество активных клиентов по всем нодам
+    total_clients = sum(int(n.get('clients_count') or 0) for n in nodes)
+
     header = f"""
     <div class="mb-3 d-flex flex-wrap align-items-center">
         <span class="badge bg-secondary">Последнее обновление: {last_str}</span>
         <span class="badge bg-info text-dark ms-2">Подключений к порту {MONITOR_PORT}: {port_info.get('unique_clients', '—')}</span>
+        <span class="badge bg-dark ms-2">Активных клиентов: {total_clients}</span>
     </div>
     """
     if system:
