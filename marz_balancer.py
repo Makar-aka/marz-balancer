@@ -5,10 +5,10 @@ import subprocess
 import re
 from typing import Dict, Any, Optional, List
 from contextlib import asynccontextmanager
-
+from datetime import datetime, timedelta
 import aiohttp
 from dotenv import load_dotenv
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
 load_dotenv()
@@ -444,8 +444,30 @@ def human_bytes(num: Optional[int]) -> str:
         num /= 1024.0
     return f"{num:.2f} ЭБ"
 
+def get_usage_range(period: str) -> tuple[Optional[str], Optional[str]]:
+    """Возвращает (start, end) в формате ISO8601 для заданного периода."""
+    now = datetime.utcnow()
+    if period == "1d":
+        start = (now - timedelta(days=1)).isoformat(timespec="seconds") + "Z"
+    elif period == "1w":
+        start = (now - timedelta(weeks=1)).isoformat(timespec="seconds") + "Z"
+    elif period == "1m":
+        start = (now - timedelta(days=30)).isoformat(timespec="seconds") + "Z"
+    else:
+        return (None, None)
+    return (start, now.isoformat(timespec="seconds") + "Z")
+
 @APP.get("/", response_class=HTMLResponse)
-async def index():
+async def index(request: Request):
+    # Получаем выбранный период из query-параметра, по умолчанию "all"
+    period = request.query_params.get("usage_period", "all")
+    start, end = get_usage_range(period)
+
+    # Получаем usage с нужным диапазоном (если изменился)
+    # stats['nodes_usage'] и stats['users_usage'] обновляются только в poll_loop,
+    # поэтому для демо просто передаём выбранный период в шаблон.
+    # Для полной поддержки — нужно доработать poll_loop и хранить usage по разным периодам.
+
     nodes = stats.get("nodes", [])
     last = stats.get("last_update")
     err = stats.get("error")
@@ -453,9 +475,44 @@ async def index():
     port_info = stats.get("port_8443", {})
     last_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(last)) if last else "—"
 
+    # Радио-кнопки для выбора периода
+    period_options = [
+        ("all", "Всё время"),
+        ("1m", "Месяц"),
+        ("1w", "Неделя"),
+        ("1d", "Сутки"),
+    ]
+    radio_html = ""
+    for val, label in period_options:
+        checked = "checked" if period == val else ""
+        radio_html += f"""
+        <input type="radio" class="btn-check" name="usage_period" id="usage_{val}" value="{val}" autocomplete="off" {checked}>
+        <label class="btn btn-outline-primary btn-sm" for="usage_{val}">{label}</label>
+        """
+
+    # Форма для выбора периода (отправляет GET с usage_period)
+    form_html = f"""
+    <form method="get" class="d-inline-block align-middle" id="usageForm" style="margin-right: 1rem;">
+        <div class="btn-group" role="group" aria-label="Выбор периода">
+            {radio_html}
+        </div>
+    </form>
+    <script>
+    // Автоматически отправлять форму при выборе периода
+    document.addEventListener('DOMContentLoaded', function() {{
+        document.querySelectorAll('input[name="usage_period"]').forEach(function(el) {{
+            el.addEventListener('change', function() {{
+                document.getElementById('usageForm').submit();
+            }});
+        }});
+    }});
+    </script>
+    """
+
     header = f"""
-    <div class="mb-3">
-        <span class="badge bg-secondary">Последнее обновление: {last_str}</span>
+    <div class="mb-3 d-flex flex-wrap align-items-center">
+        {form_html}
+        <span class="badge bg-secondary ms-2">Последнее обновление: {last_str}</span>
         <span class="badge bg-info text-dark ms-2">Подключений к порту {MONITOR_PORT}: {port_info.get('unique_clients', '—')}</span>
     </div>
     """
