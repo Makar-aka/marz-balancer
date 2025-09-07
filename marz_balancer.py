@@ -189,6 +189,21 @@ def _normalize_node_response(data: Any) -> Dict[str, Any]:
                 
     return {"count": count, "count_all": count_all, "clients": clients}
 
+async def reconnect_node(session: aiohttp.ClientSession, token: Optional[str], node_id: int) -> bool:
+    """Отправляет запрос на переподключение ноды"""
+    if not MARZBAN_URL or not token:
+        return False
+        
+    headers = {"Authorization": f"Bearer {token}"}
+    url = f"{MARZBAN_URL}/api/node/{node_id}/reconnect"
+    
+    try:
+        async with session.post(url, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+            return resp.status == 200
+    except Exception as e:
+        print(f"Ошибка при попытке переподключения ноды {node_id}: {e}")
+        return False
+
 def _build_ip_agent_base(node: Dict[str, Any]) -> Optional[str]:
     addr = node.get("address") or node.get("name") or ""
     if not addr:
@@ -274,6 +289,9 @@ def _parse_ss_output_for_remote_ips(output: str) -> List[str]:
 
 async def poll_loop():
     global first_run
+    # Словарь для хранения счетчиков неудач и времени последнего переподключения
+    node_failures = {}  # Формат: {node_id: {"count": int, "last_reconnect": timestamp}}
+    
     async with aiohttp.ClientSession() as session:
         while True:
             try:
@@ -296,6 +314,11 @@ async def poll_loop():
                     await asyncio.sleep(POLL_INTERVAL)
                     continue
 
+                # Очищаем счетчики неудач для нод, которых больше нет в списке
+                current_node_ids = {n.get("id") for n in nodes if n.get("id")}
+                node_failures = {node_id: data for node_id, data in node_failures.items() 
+                               if node_id in current_node_ids}
+
                 node_entries: List[Dict[str, Any]] = []
                 for n in nodes:
                     entry = {
@@ -311,7 +334,47 @@ async def poll_loop():
                         "clients_error": None,
                         "uplink": None,
                         "downlink": None,
+                        "reconnect_attempts": node_failures.get(n.get("id"), {}).get("count", 0),
                     }
+                    
+                    # Обработка статуса нод для функции переподключения
+                    node_id = n.get("id")
+                    status = n.get("status")
+                    
+                    if node_id:
+                        if status != "connected":
+                            # Увеличиваем счетчик неудач
+                            if node_id not in node_failures:
+                                node_failures[node_id] = {"count": 0, "last_reconnect": 0}
+                            node_failures[node_id]["count"] += 1
+                            
+                            # Проверяем, нужно ли переподключиться
+                            current_time = time.time()
+                            if (node_failures[node_id]["count"] >= NODE_RECONNECT_THRESHOLD and 
+                                current_time - node_failures[node_id].get("last_reconnect", 0) > NODE_RECONNECT_COOLDOWN):
+                                
+                                # Пытаемся переподключить ноду
+                                success = await reconnect_node(session, token, node_id)
+                                node_failures[node_id]["last_reconnect"] = current_time
+                                
+                                # Уведомление о попытке переподключения
+                                if TELEGRAM_ENABLED:
+                                    node_name = n.get("name") or n.get("address") or f"Node {node_id}"
+                                    message = f"🔄 <b>Попытка переподключения ноды:</b> {node_name}\n"
+                                    message += f"Результат: {'✅ Успешно' if success else '❌ Неудачно'}\n"
+                                    message += f"Статус до переподключения: {status}"
+                                    
+                                    from telegram_notify import send_telegram_message
+                                    await send_telegram_message(message)
+                                    
+                                # Если переподключение успешно, сбрасываем счетчик
+                                if success:
+                                    node_failures[node_id]["count"] = 0
+                        else:
+                            # Нода в порядке, сбрасываем счетчик
+                            if node_id in node_failures:
+                                node_failures[node_id]["count"] = 0
+                    
                     node_entries.append(entry)
 
                 if nodes_usage and isinstance(nodes_usage, dict):
@@ -395,6 +458,15 @@ def get_usage_range(period: str) -> tuple[Optional[str], Optional[str]]:
         return (None, None)
     return (start, now.isoformat(timespec="seconds") + "Z")
 
+def status_badge_class(status: Optional[str]) -> str:
+    """Возвращает класс бейджа для статуса ноды"""
+    if status == "connected":
+        return "bg-success"
+    elif status == "connecting":
+        return "bg-warning text-dark"
+    else:
+        return "bg-danger"
+
 APP = FastAPI(lifespan=lifespan)
 
 @APP.get("/api/stats")
@@ -432,33 +504,42 @@ async def index(request: Request):
         </div>
         """
 
-    items = ""
-    for n in nodes:
-        count_all = n.get('count_all')
-        clients_count = n.get('clients_count')
+        items = ""
+        for n in nodes:
+            count_all = n.get('count_all')
+            clients_count = n.get('clients_count')
+            reconnect_attempts = n.get('reconnect_attempts', 0)
         
-        items += f"""
-        <div class="col">
-            <div class="card shadow-sm mb-4">
-                <div class="card-header bg-light">
-                    <b>{n.get('name') or n.get('address')}</b>
-                </div>
-                <div class="card-body">
-                    <ul class="list-group list-group-flush">
-                        <li class="list-group-item"><b>Address:</b> {n.get('address') or '—'}</li>
-                        <li class="list-group-item"><b>API port:</b> {n.get('api_port') or '—'}</li>
-                        <li class="list-group-item"><b>Status:</b> {n.get('status') or '—'}</li>
-                        <li class="list-group-item">
-                            <b>Клиентов:</b> {clients_count if clients_count is not None else '—'}
-                            {f" <span class='text-muted'>({count_all} соед.)</span>" if count_all is not None and count_all != clients_count else ""}
-                        </li>
-                        <li class="list-group-item"><b>Uplink:</b> {human_bytes(n.get('uplink'))} <b>Downlink:</b> {human_bytes(n.get('downlink'))}</li>
-                    </ul>
-                    {"<div class='alert alert-danger mt-2'>Clients error: " + n.get('clients_error') + "</div>" if n.get('clients_error') else ""}
+            # Добавляем предупреждение, если были попытки переподключения
+            reconnect_info = ""
+            if reconnect_attempts > 0:
+                reconnect_info = f'<div class="alert alert-warning mt-2">Попыток переподключения: {reconnect_attempts}</div>'
+        
+            items += f"""
+            <div class="col">
+                <div class="card shadow-sm mb-4">
+                    <div class="card-header bg-light d-flex justify-content-between align-items-center">
+                        <b>{n.get('name') or n.get('address')}</b>
+                        <div>
+                            <span class="badge {status_badge_class(n.get('status'))}">{n.get('status', '—')}</span>
+                        </div>
+                    </div>
+                    <div class="card-body">
+                        <ul class="list-group list-group-flush">
+                            <li class="list-group-item"><b>Address:</b> {n.get('address') or '—'}</li>
+                            <li class="list-group-item"><b>API port:</b> {n.get('api_port') or '—'}</li>
+                            <li class="list-group-item">
+                                <b>Клиентов:</b> {clients_count if clients_count is not None else '—'}
+                                {f" <span class='text-muted'>({count_all} соед.)</span>" if count_all is not None and count_all != clients_count else ""}
+                            </li>
+                            <li class="list-group-item"><b>Uplink:</b> {human_bytes(n.get('uplink'))} <b>Downlink:</b> {human_bytes(n.get('downlink'))}</li>
+                        </ul>
+                        {"<div class='alert alert-danger mt-2'>Clients error: " + n.get('clients_error') + "</div>" if n.get('clients_error') else ""}
+                        {reconnect_info}
+                    </div>
                 </div>
             </div>
-        </div>
-        """
+            """
     if not items:
         items = "<div class='alert alert-warning'>Ноды не обнаружены.</div>"
 
