@@ -552,13 +552,14 @@ async def index(request: Request):
                 </div>
             </div>
         </div>
-        """
-    if not items:
-        items = "<div class='alert alert-warning'>Ноды не обнаружены.</div>"
         <div class="mb-4">
             <h5>График количества пользователей по нодам</h5>
             <img src="/users_graph.png?{{ last_str }}" class="img-fluid" alt="График пользователей">
         </div>
+        """
+    if not items:
+        items = "<div class='alert alert-warning'>Ноды не обнаружены.</div>"
+        
     html = f"""<!doctype html>
 <html lang="ru">
 <head>
