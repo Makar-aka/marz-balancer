@@ -473,9 +473,34 @@ APP = FastAPI(lifespan=lifespan)
 async def api_stats():
     return JSONResponse(content=stats)
 
+@APP.post("/api/reconnect/{node_id}")
+async def api_reconnect(node_id: int):
+    """Эндпоинт для ручного переподключения ноды"""
+    async with aiohttp.ClientSession() as session:
+        token = await _fetch_token(session)
+        if not token:
+            return JSONResponse(content={"success": False, "error": "Failed to authenticate"}, status_code=401)
+        
+        success = await reconnect_node(session, token, node_id)
+        
+        if success:
+            # Отправим уведомление в Telegram
+            if TELEGRAM_ENABLED:
+                for n in stats.get("nodes", []):
+                    if n.get("id") == node_id:
+                        node_name = n.get("name") or n.get("address") or f"Node {node_id}"
+                        message = f"🔄 <b>Ручное переподключение ноды:</b> {node_name}"
+                        from telegram_notify import send_telegram_message
+                        await send_telegram_message(message)
+                        break
+                        
+            return JSONResponse(content={"success": True, "message": "Node reconnect request sent"})
+        else:
+            return JSONResponse(content={"success": False, "error": "Failed to reconnect node"}, status_code=500)
+
 @APP.get("/", response_class=HTMLResponse)
 async def index(request: Request):
-    nodes = stats.get("nodes", [])  # Эта строка отсутствовала, отсюда ошибка
+    nodes = stats.get("nodes", [])
     last = stats.get("last_update")
     err = stats.get("error")
     system = stats.get("system")
@@ -504,42 +529,48 @@ async def index(request: Request):
         </div>
         """
 
-        items = ""
-        for n in nodes:
-            count_all = n.get('count_all')
-            clients_count = n.get('clients_count')
-            reconnect_attempts = n.get('reconnect_attempts', 0)
+    items = ""
+    for n in nodes:
+        count_all = n.get('count_all')
+        clients_count = n.get('clients_count')
+        reconnect_attempts = n.get('reconnect_attempts', 0)
         
-            # Добавляем предупреждение, если были попытки переподключения
-            reconnect_info = ""
-            if reconnect_attempts > 0:
-                reconnect_info = f'<div class="alert alert-warning mt-2">Попыток переподключения: {reconnect_attempts}</div>'
+        # Добавляем предупреждение, если были попытки переподключения
+        reconnect_info = ""
+        if reconnect_attempts > 0:
+            reconnect_info = f'<div class="alert alert-warning mt-2">Попыток переподключения: {reconnect_attempts}</div>'
         
-            items += f"""
-            <div class="col">
-                <div class="card shadow-sm mb-4">
-                    <div class="card-header bg-light d-flex justify-content-between align-items-center">
-                        <b>{n.get('name') or n.get('address')}</b>
-                        <div>
-                            <span class="badge {status_badge_class(n.get('status'))}">{n.get('status', '—')}</span>
-                        </div>
-                    </div>
-                    <div class="card-body">
-                        <ul class="list-group list-group-flush">
-                            <li class="list-group-item"><b>Address:</b> {n.get('address') or '—'}</li>
-                            <li class="list-group-item"><b>API port:</b> {n.get('api_port') or '—'}</li>
-                            <li class="list-group-item">
-                                <b>Клиентов:</b> {clients_count if clients_count is not None else '—'}
-                                {f" <span class='text-muted'>({count_all} соед.)</span>" if count_all is not None and count_all != clients_count else ""}
-                            </li>
-                            <li class="list-group-item"><b>Uplink:</b> {human_bytes(n.get('uplink'))} <b>Downlink:</b> {human_bytes(n.get('downlink'))}</li>
-                        </ul>
-                        {"<div class='alert alert-danger mt-2'>Clients error: " + n.get('clients_error') + "</div>" if n.get('clients_error') else ""}
-                        {reconnect_info}
+        items += f"""
+        <div class="col">
+            <div class="card shadow-sm mb-4">
+                <div class="card-header bg-light d-flex justify-content-between align-items-center">
+                    <b>{n.get('name') or n.get('address')}</b>
+                    <div class="d-flex align-items-center">
+                        <span class="badge {status_badge_class(n.get('status'))}">{n.get('status', '—')}</span>
+                        <button class="btn btn-sm btn-outline-secondary ms-2 reconnect-btn" 
+                                data-node-id="{n.get('id')}" 
+                                data-bs-toggle="tooltip" 
+                                title="Переподключить ноду">
+                            <i class="bi bi-arrow-clockwise"></i>
+                        </button>
                     </div>
                 </div>
+                <div class="card-body">
+                    <ul class="list-group list-group-flush">
+                        <li class="list-group-item"><b>Address:</b> {n.get('address') or '—'}</li>
+                        <li class="list-group-item"><b>API port:</b> {n.get('api_port') or '—'}</li>
+                        <li class="list-group-item">
+                            <b>Клиентов:</b> {clients_count if clients_count is not None else '—'}
+                            {f" <span class='text-muted'>({count_all} соед.)</span>" if count_all is not None and count_all != clients_count else ""}
+                        </li>
+                        <li class="list-group-item"><b>Uplink:</b> {human_bytes(n.get('uplink'))} <b>Downlink:</b> {human_bytes(n.get('downlink'))}</li>
+                    </ul>
+                    {"<div class='alert alert-danger mt-2'>Clients error: " + n.get('clients_error') + "</div>" if n.get('clients_error') else ""}
+                    {reconnect_info}
+                </div>
             </div>
-            """
+        </div>
+        """
     if not items:
         items = "<div class='alert alert-warning'>Ноды не обнаружены.</div>"
 
@@ -550,6 +581,7 @@ async def index(request: Request):
     <title>Marzban nodes</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.2/font/bootstrap-icons.min.css">
 </head>
 <body class="bg-light">
 <div class="container py-4">
@@ -568,7 +600,60 @@ async def index(request: Request):
    &copy; MakarSPB
 </a>
 
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 <script>
+// Инициализация тултипов
+document.addEventListener('DOMContentLoaded', function() {
+    const tooltipTriggerList = document.querySelectorAll('[data-bs-toggle="tooltip"]');
+    const tooltipList = [...tooltipTriggerList].map(tooltipTriggerEl => new bootstrap.Tooltip(tooltipTriggerEl));
+
+    // Обработчик для кнопок переподключения
+    document.querySelectorAll('.reconnect-btn').forEach(button => {
+        button.addEventListener('click', async function() {
+            const nodeId = this.getAttribute('data-node-id');
+            if (!nodeId) return;
+            
+            if (!confirm('Вы уверены, что хотите переподключить эту ноду?')) {
+                return;
+            }
+            
+            // Блокируем кнопку и показываем спиннер
+            this.disabled = true;
+            const originalContent = this.innerHTML;
+            this.innerHTML = '<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span>';
+            
+            try {
+                const response = await fetch(`/api/reconnect/${{nodeId}}`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    }
+                });
+                
+                const result = await response.json();
+                
+                if (response.ok) {
+                    // Успешное переподключение
+                    alert('Запрос на переподключение отправлен');
+                    // Перезагружаем страницу через 2 секунды
+                    setTimeout(() => location.reload(), 2000);
+                } else {
+                    // Ошибка
+                    alert(`Ошибка: ${{result.error || 'Не удалось выполнить запрос'}}`);
+                    // Восстанавливаем кнопку
+                    this.disabled = false;
+                    this.innerHTML = originalContent;
+                }
+            } catch (error) {
+                alert(`Произошла ошибка: ${{error.message}}`);
+                this.disabled = false;
+                this.innerHTML = originalContent;
+            }
+        });
+    });
+});
+
+// Автоматическое обновление страницы
 setTimeout(()=>location.reload(), {int(POLL_INTERVAL*1000)});
 </script>
 </body>
