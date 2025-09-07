@@ -160,19 +160,37 @@ async def check_nodes_changes(nodes):
     
     # Проверяем новые ноды
     new_nodes = current_node_ids - previous_node_ids
-    for node_id in new_nodes:
-        node = next((n for n in nodes if str(n.get("id")) == node_id), None)
-        if node:
-            node_name = node.get("name") or node.get("address") or f"Node {node_id}"
-            message = f"🆕 <b>Обнаружена новая нода:</b> {node_name}"
+    if new_nodes:
+        new_node_names = []
+        for node_id in new_nodes:
+            node = next((n for n in nodes if str(n.get("id")) == node_id), None)
+            if node:
+                node_name = node.get("name") or node.get("address") or f"Node {node_id}"
+                new_node_names.append(node_name)
+        
+        if new_node_names:
+            if len(new_node_names) == 1:
+                message = f"🆕 <b>Добавлена нода:</b> {new_node_names[0]}"
+            else:
+                message = f"🆕 <b>Новые ноды ({len(new_node_names)}):</b>\n"
+                for i, name in enumerate(new_node_names):
+                    prefix = "└" if i == len(new_node_names) - 1 else "├"
+                    message += f"{prefix} {name}\n"
             await send_telegram_message(message)
     
     # Проверяем удаленные ноды
     removed_nodes = previous_node_ids - current_node_ids
     if removed_nodes:
-        message = f"❌ <b>Удалено нод:</b> {len(removed_nodes)}"
-        if len(removed_nodes) <= 5:  # Если немного нод, показываем их ID
-            message += "\nID удаленных нод: " + ", ".join(removed_nodes)
+        if len(removed_nodes) == 1:
+            node_id = list(removed_nodes)[0]
+            message = f"❌ <b>Удалена нода:</b> {node_id}"
+        else:
+            message = f"❌ <b>Удалены ноды ({len(removed_nodes)}):</b>\n"
+            for i, node_id in enumerate(list(removed_nodes)[:5]):
+                prefix = "└" if i == len(removed_nodes) - 1 or i == 4 else "├"
+                message += f"{prefix} {node_id}\n"
+            if len(removed_nodes) > 5:
+                message += f"└ и ещё {len(removed_nodes) - 5}...\n"
         await send_telegram_message(message)
     
     # Сохраняем текущий список нод
@@ -184,18 +202,20 @@ async def send_startup_notification(nodes):
     online_nodes = sum(1 for n in nodes if n.get("status") == "connected")
     total_nodes = len(nodes)
     
-    message = f"🚀 <b>Мониторинг Marzban запущен</b>\n\n"
-    message += f"Всего нод: {total_nodes}\n"
-    message += f"Онлайн нод: {online_nodes}\n"
+    message = f"🚀 <b>Marzban Monitor</b> запущен\n\n"
+    message += f"📊 <b>Статистика:</b>\n"
+    message += f"├ Всего нод: {total_nodes}\n"
+    message += f"└ Онлайн: {online_nodes}/{total_nodes}\n"
     
-    if total_nodes > 0:
+    if total_nodes > 0 and online_nodes < total_nodes:
         offline_nodes = [n.get("name") or n.get("address") or f"Node {n.get('id')}" 
                          for n in nodes if n.get("status") != "connected"]
         if offline_nodes:
-            message += f"\nНедоступные ноды ({len(offline_nodes)}):\n"
-            message += "\n".join([f"- {name}" for name in offline_nodes[:5]])
-            if len(offline_nodes) > 5:
-                message += f"\n...и ещё {len(offline_nodes) - 5}"
+            message += f"\n❌ <b>Недоступны:</b> "
+            if len(offline_nodes) <= 5:
+                message += ", ".join(offline_nodes)
+            else:
+                message += ", ".join(offline_nodes[:4]) + f" и ещё {len(offline_nodes)-4}"
     
     await send_telegram_message(message)
 
@@ -213,27 +233,25 @@ async def check_node_status_changes(nodes):
             node_name = node.get("name") or node.get("address") or f"Node {node_id}"
             
             if current_status != "connected" and previous_status == "connected":
-                # Нода стала недоступной, сохраняем время
+                # Нода стала недоступной
                 await set_node_down_time(node_id)
-                message = f"⚠️ <b>Нода недоступна:</b> {node_name}\n"
-                message += f"Текущий статус: {current_status}"
+                message = f"⚠️ <b>Нода отключена:</b> {node_name}\n"
+                message += f"└ Статус: <code>{current_status}</code>"
                 await send_telegram_message(message)
                 await set_node_last_notified(node_id)
                 
             elif current_status == "connected" and previous_status != "connected":
-                # Нода восстановилась, проверяем сколько времени была недоступна
+                # Нода восстановилась
                 down_time = await get_node_down_time(node_id)
-                message = f"✅ <b>Нода снова доступна:</b> {node_name}"
+                message = f"✅ <b>Нода онлайн:</b> {node_name}"
                 
                 if down_time:
                     current_time = datetime.utcnow().timestamp()
                     downtime_seconds = current_time - down_time
                     formatted_downtime = format_downtime(downtime_seconds)
-                    message += f"\nВремя отвала: {formatted_downtime}"
+                    message += f"\n└ Простой: <b>{formatted_downtime}</b>"
                 
                 await send_telegram_message(message)
-                
-                # Очищаем информацию о времени недоступности
                 await clear_node_down_time(node_id)
                 
         await save_node_status_to_redis(node_id, current_status)
@@ -241,42 +259,45 @@ async def check_node_status_changes(nodes):
 async def check_offline_nodes_reminders(nodes):
     """Напоминания о нодах, которые долго остаются недоступными"""
     current_time = datetime.utcnow().timestamp()
-    # Теперь интервал в минутах вместо часов
-    reminder_interval_seconds = NODE_REMINDER_INTERVAL * 60  # минуты * 60 = секунды
+    reminder_interval_seconds = NODE_REMINDER_INTERVAL * 60  # минуты в секунды
     
+    offline_nodes = []
     for node in nodes:
         node_id = node.get("id")
-        if not node_id:
+        if not node_id or node.get("status") == "connected":
             continue
             
         current_status = node.get("status")
+        last_notified = await get_node_last_notified(node_id)
         
-        if current_status != "connected":
-            last_notified = await get_node_last_notified(node_id)
+        if last_notified is None or (current_time - last_notified) > reminder_interval_seconds:
+            node_name = node.get("name") or node.get("address") or f"Node {node_id}"
             
-            if last_notified is None or (current_time - last_notified) > reminder_interval_seconds:
-                node_name = node.get("name") or node.get("address") or f"Node {node_id}"
-                
-                # Получаем время начала недоступности
-                down_time = await get_node_down_time(node_id)
-                total_downtime = "неизвестно"
-                
-                if down_time:
-                    downtime_seconds = current_time - down_time
-                    total_downtime = format_downtime(downtime_seconds)
-                
-                # Время с последнего уведомления в минутах
-                minutes_since_notify = "неизвестно"
-                if last_notified:
-                    minutes = (current_time - last_notified) / 60  # теперь в минутах
-                    minutes_since_notify = f"{minutes:.1f}"
-                    
-                message = f"⚠️ <b>Напоминание:</b> Нода {node_name} остаётся недоступной\n"
-                message += f"Общее время отвала: {total_downtime}\n"
-                message += f"Статус: {current_status}"
-                
-                await send_telegram_message(message)
-                await set_node_last_notified(node_id)
+            # Получаем время начала недоступности
+            down_time = await get_node_down_time(node_id)
+            total_downtime = "неизвестно"
+            
+            if down_time:
+                downtime_seconds = current_time - down_time
+                total_downtime = format_downtime(downtime_seconds)
+            
+            offline_nodes.append((node_name, current_status, total_downtime))
+            await set_node_last_notified(node_id)
+    
+    # Отправляем одно общее уведомление для всех недоступных нод
+    if offline_nodes:
+        if len(offline_nodes) == 1:
+            node_name, status, downtime = offline_nodes[0]
+            message = f"⚠️ <b>Нода всё ещё недоступна:</b> {node_name}\n"
+            message += f"├ Статус: <code>{status}</code>\n"
+            message += f"└ Время простоя: <b>{downtime}</b>"
+        else:
+            message = f"⚠️ <b>Недоступные ноды ({len(offline_nodes)}):</b>\n"
+            for i, (node_name, status, downtime) in enumerate(offline_nodes):
+                prefix = "└" if i == len(offline_nodes) - 1 else "├"
+                message += f"{prefix} {node_name} • <b>{downtime}</b>\n"
+        
+        await send_telegram_message(message)
 
 async def process_notifications(nodes, is_first_run=False):
     """Обрабатывает все уведомления для нод"""
