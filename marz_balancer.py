@@ -1,6 +1,8 @@
 import os
 import time
 import asyncio
+import subprocess
+import re
 from typing import Dict, Any, Optional, List
 from contextlib import asynccontextmanager
 
@@ -16,19 +18,18 @@ MARZBAN_ADMIN_USER = os.getenv("MARZBAN_ADMIN_USER", "")
 MARZBAN_ADMIN_PASS = os.getenv("MARZBAN_ADMIN_PASS", "")
 POLL_INTERVAL = float(os.getenv("POLL_INTERVAL", "5"))
 APP_PORT = int(os.getenv("APP_PORT", "8023"))
+IP_AGENT_PORT = os.getenv("IP_AGENT_PORT", "").strip()
+
+# port to monitor for unique client IPs
+MONITOR_PORT = int(os.getenv("MONITOR_PORT", "8443"))
 
 # candidate node endpoints to try for live clients
+# Оставляем только необходимые пути — ваш микросервис (/connections),
+# плюс запасные /clients и /status для совместимости.
 NODE_CANDIDATE_PATHS = [
-    "/api/clients",
-    "/clients",
-    "/api/v1/clients",
-    "/v1/clients",
-    "/api/connections",
     "/connections",
-    "/api/peers",
-    "/peers",
+    "/clients",
     "/status",
-    "/stats",
 ]
 
 # runtime state
@@ -39,6 +40,7 @@ stats: Dict[str, Any] = {
     "system": None,
     "nodes_usage": None,
     "users_usage": None,
+    "port_8443": {"unique_clients": 0, "clients": []},
 }
 _token_cache: Dict[str, Any] = {"token": None, "fetched_at": 0, "ttl": 300}
 
@@ -147,11 +149,18 @@ def _build_node_base(node: Dict[str, Any]) -> str:
     if not addr:
         return ""
     if addr.startswith("http://") or addr.startswith("https://"):
-        if api_port and ":" not in addr.split("://", 1)[1]:
-            return f"{addr.rstrip('/')}:{api_port}"
+        # если в адресе нет порта — добавляем api_port или глобальный IP_AGENT_PORT
+        if ":" not in addr.split("://", 1)[1]:
+            if api_port:
+                return f"{addr.rstrip('/')}:{api_port}"
+            if IP_AGENT_PORT:
+                return f"{addr.rstrip('/')}:{IP_AGENT_PORT}"
         return addr.rstrip("/")
+    # addr без схемы: используем api_port, иначе fallback на IP_AGENT_PORT
     if api_port:
         return f"http://{addr}:{api_port}"
+    if IP_AGENT_PORT:
+        return f"http://{addr}:{IP_AGENT_PORT}"
     return f"http://{addr}"
 
 
@@ -171,19 +180,32 @@ async def _try_node_path(session: aiohttp.ClientSession, base: str, path: str, t
 
 
 def _normalize_node_response(data: Any) -> Dict[str, Any]:
+    """
+    Нормализует разные форматы ответа ноды в единый {'count': int, 'clients': list}.
+    Поддерживает стандартные ключи clients/connections/peers и новый формат с 'ips'.
+    """
     clients: List[Any] = []
     count = 0
     if isinstance(data, list):
         clients = data
         count = len(clients)
-    elif isinstance(data, dict):
-        for key in ("clients", "connections", "peers"):
+        return {"count": count, "clients": clients}
+    if isinstance(data, dict):
+        # first, handle explicit "ips" microservice format
+        if "ips" in data and isinstance(data["ips"], list):
+            clients = data["ips"]
+            count = int(data.get("count", len(clients)))
+            return {"count": count, "clients": clients, "port": data.get("port"), "meta": {k: data.get(k) for k in ("count_ipv4_enabled", "count_ipv6_enabled", "trusted_ips_configured") if k in data}}
+        # common keys for list of clients
+        for key in ("clients", "connections", "peers", "addresses"):
             if key in data and isinstance(data[key], list):
                 clients = data[key]
                 count = len(clients)
                 return {"count": count, "clients": clients}
+        # if node returns only count number
         if "count" in data and isinstance(data["count"], int):
             return {"count": data["count"], "clients": []}
+        # fallback: find any list value
         for k, v in data.items():
             if isinstance(v, list):
                 clients = v
@@ -214,12 +236,101 @@ async def fetch_node_clients(session: aiohttp.ClientSession, node: Dict[str, Any
         if isinstance(res, dict) and res.get("error"):
             continue
         norm = _normalize_node_response(res)
-        if norm["count"] > 0 or len(norm["clients"]) > 0 or isinstance(res, (list, dict)):
-            result.update({"count": norm["count"], "clients": norm["clients"], "detected_path": p})
+        # accept responses that contain clients list or count
+        if norm.get("count", 0) > 0 or len(norm.get("clients", [])) > 0 or isinstance(res, (list, dict)):
+            # attach raw meta fields if available (e.g. port / trusted)
+            if isinstance(norm, dict) and "meta" in norm:
+                result["meta"] = norm["meta"]
+            if isinstance(norm, dict) and "port" in norm:
+                result["port"] = norm["port"]
+            result.update({"count": norm.get("count", 0), "clients": norm.get("clients", []), "detected_path": p})
             return result
 
     result["error"] = "no usable endpoint"
     return result
+
+
+# ------------------ new: unique connections counter (fallback) ------------------
+def _parse_ss_output_for_remote_ips(output: str) -> List[str]:
+    ips = set()
+    # each useful line contains Local Address:Port  Peer Address:Port
+    for line in output.splitlines():
+        line = line.strip()
+        if not line or line.lower().startswith("netid") or line.lower().startswith("state"):
+            continue
+        # peer is usually last column
+        parts = re.split(r"\s+", line)
+        if len(parts) < 1:
+            continue
+        peer = parts[-1]
+        # strip possible brackets for IPv6 and port
+        # match ending :port
+        m = re.match(r"^\[?([^\]]+?)\]?:(\d+)$", peer)
+        if m:
+            ip = m.group(1)
+            ips.add(ip)
+        else:
+            # try split by colon (last colon before port)
+            if ":" in peer:
+                # for IPv6 peer may contain many colons; split from right
+                ip = peer.rsplit(":", 1)[0]
+                # remove surrounding brackets
+                ip = ip.strip("[]")
+                ips.add(ip)
+    return list(ips)
+
+
+def get_unique_remote_ips(port: int) -> List[str]:
+    """
+    Try to get unique remote IPs connected to local TCP port `port`.
+    Prefer `ss` parsing, fallback to /proc/net/tcp (IPv4).
+    """
+    # try ss first
+    try:
+        cmd = ["ss", "-tn", "state", "established", "sport", f":{port}"]
+        out = subprocess.check_output(cmd, stderr=subprocess.DEVNULL, text=True, timeout=3)
+        ips = _parse_ss_output_for_remote_ips(out)
+        if ips:
+            return ips
+    except Exception:
+        pass
+
+    # fallback: parse /proc/net/tcp for IPv4
+    try:
+        if os.path.exists("/proc/net/tcp"):
+            ips = set()
+            with open("/proc/net/tcp", "r", encoding="utf-8") as f:
+                next(f)  # skip header
+                for line in f:
+                    cols = line.split()
+                    if len(cols) < 4:
+                        continue
+                    local, remote, state = cols[1], cols[2], cols[3]
+                    if state != "01":  # 01 = ESTABLISHED
+                        continue
+                    # local format: "0100007F:1F90" (hex ip:hex port)
+                    try:
+                        laddr_hex, lport_hex = local.split(":")
+                        lport = int(lport_hex, 16)
+                    except Exception:
+                        continue
+                    if lport != port:
+                        continue
+                    raddr_hex, rport_hex = remote.split(":")
+                    try:
+                        # convert little-endian hex IPv4 to dotted quad
+                        import struct, socket
+                        ip_int = int(raddr_hex, 16)
+                        packed = struct.pack("<I", ip_int)
+                        ip = socket.inet_ntoa(packed)
+                        ips.add(ip)
+                    except Exception:
+                        continue
+            return list(ips)
+    except Exception:
+        pass
+
+    return []
 
 
 async def poll_loop():
@@ -296,8 +407,21 @@ async def poll_loop():
                     node_entries[i]["clients"] = res.get("clients", [])
                     node_entries[i]["detected_path"] = res.get("detected_path")
                     node_entries[i]["clients_error"] = res.get("error")
+                    # attach optional meta (port/trusted) if provided by node microservice
+                    if res.get("port") is not None:
+                        node_entries[i]["clients_port"] = res.get("port")
+                    if res.get("meta") is not None:
+                        node_entries[i]["clients_meta"] = res.get("meta")
 
                 stats["nodes"] = node_entries
+
+                # get unique remote IPs to MONITOR_PORT without blocking loop (local fallback)
+                try:
+                    unique_ips = await asyncio.to_thread(get_unique_remote_ips, MONITOR_PORT)
+                    stats["port_8443"] = {"unique_clients": len(unique_ips), "clients": unique_ips[:200]}
+                except Exception:
+                    stats["port_8443"] = {"unique_clients": 0, "clients": []}
+
                 stats["error"] = None
                 stats["last_update"] = time.time()
             except Exception as ex:
@@ -337,12 +461,11 @@ def _normalize_users_usage(data: Any) -> List[Dict[str, Any]]:
     if isinstance(data, list):
         return data
     if isinstance(data, dict):
-        # common keys: 'users', 'items', or top-level list under some key
+        # common keys: 'users', 'items', 'data', 'usages'
         for key in ("users", "items", "data", "usages"):
             v = data.get(key)
             if isinstance(v, list):
                 return v
-        # fallback: find the first list value
         for v in data.values():
             if isinstance(v, list):
                 return v
@@ -360,9 +483,11 @@ async def index():
     last = stats.get("last_update")
     err = stats.get("error")
     system = stats.get("system")
+    port_info = stats.get("port_8443", {})
     last_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(last)) if last else "—"
 
     header = f"<div>Последнее обновление: {last_str}</div>"
+    header += f"<div>Подключений к порту {MONITOR_PORT}: {port_info.get('unique_clients', '—')}</div>"
     if system:
         header += f"<div>Online users (master): {system.get('online_users', '—')}</div>"
         header += f"<div>Incoming bandwidth: {system.get('incoming_bandwidth', '—')}</div>"
@@ -379,6 +504,10 @@ async def index():
         if n.get("message"):
             items += f"Message: {n.get('message')}<br/>"
         items += f"Clients: {n.get('clients_count') if n.get('clients_count') is not None else '—'}<br/>"
+        if n.get("clients_port"):
+            items += f"Clients port: {n.get('clients_port')}<br/>"
+        if n.get("clients_meta"):
+            items += f"Clients meta: {n.get('clients_meta')}<br/>"
         items += f"Uplink: {n.get('uplink') if n.get('uplink') is not None else '—'} Downlink: {n.get('downlink') if n.get('downlink') is not None else '—'}<br/>"
         if n.get("detected_path"):
             items += f"Detected path: {n.get('detected_path')}<br/>"
@@ -386,7 +515,7 @@ async def index():
             items += f"<div style='color:#b00'>Clients error: {n.get('clients_error')}</div>"
         if n.get("clients"):
             items += "<details><summary>Клиенты (пример)</summary><ul>"
-            for c in n.get("clients")[:20]:
+            for c in n.get("clients")[:200]:
                 if isinstance(c, dict):
                     identifier = c.get("id") or c.get("peer") or c.get("addr") or str(c)
                 else:
@@ -397,7 +526,6 @@ async def index():
     if not items:
         items = "<div>Ноды не обнаружены.</div>"
 
-    # normalize users_usage to list safely
     users_list = _normalize_users_usage(stats.get("users_usage"))
     users_usage_summary = ""
     if users_list:
