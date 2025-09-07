@@ -465,7 +465,6 @@ async def index(request: Request):
     </div>
 </div>
 
-<!-- Текстовая ссылка-копирайт в нижнем правом углу -->
 <a href="https://github.com/Makar-aka/marz-balancer"
    target="_blank" rel="noopener noreferrer"
    class="position-fixed end-0 bottom-0 m-3 small text-muted text-decoration-underline"
