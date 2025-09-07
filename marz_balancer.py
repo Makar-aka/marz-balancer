@@ -603,55 +603,55 @@ async def index(request: Request):
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 <script>
 // Инициализация тултипов
-document.addEventListener('DOMContentLoaded', function() {
+document.addEventListener('DOMContentLoaded', function() {{
     const tooltipTriggerList = document.querySelectorAll('[data-bs-toggle="tooltip"]');
     const tooltipList = [...tooltipTriggerList].map(tooltipTriggerEl => new bootstrap.Tooltip(tooltipTriggerEl));
 
     // Обработчик для кнопок переподключения
-    document.querySelectorAll('.reconnect-btn').forEach(button => {
-        button.addEventListener('click', async function() {
+    document.querySelectorAll('.reconnect-btn').forEach(button => {{
+        button.addEventListener('click', async function() {{
             const nodeId = this.getAttribute('data-node-id');
             if (!nodeId) return;
             
-            if (!confirm('Вы уверены, что хотите переподключить эту ноду?')) {
+            if (!confirm('Вы уверены, что хотите переподключить эту ноду?')) {{
                 return;
-            }
+            }}
             
             // Блокируем кнопку и показываем спиннер
             this.disabled = true;
             const originalContent = this.innerHTML;
             this.innerHTML = '<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span>';
             
-            try {
-                const response = await fetch(`/api/reconnect/${{nodeId}}`, {
+            try {{
+                const response = await fetch(`/api/reconnect/${{nodeId}}`, {{
                     method: 'POST',
-                    headers: {
+                    headers: {{
                         'Content-Type': 'application/json'
-                    }
-                });
+                    }}
+                }});
                 
                 const result = await response.json();
                 
-                if (response.ok) {
+                if (response.ok) {{
                     // Успешное переподключение
                     alert('Запрос на переподключение отправлен');
                     // Перезагружаем страницу через 2 секунды
                     setTimeout(() => location.reload(), 2000);
-                } else {
+                }} else {{
                     // Ошибка
                     alert(`Ошибка: ${{result.error || 'Не удалось выполнить запрос'}}`);
                     // Восстанавливаем кнопку
                     this.disabled = false;
                     this.innerHTML = originalContent;
-                }
-            } catch (error) {
+                }}
+            }} catch (error) {{
                 alert(`Произошла ошибка: ${{error.message}}`);
                 this.disabled = false;
                 this.innerHTML = originalContent;
-            }
-        });
-    });
-});
+            }}
+        }});
+    }});
+}});
 
 // Автоматическое обновление страницы
 setTimeout(()=>location.reload(), {int(POLL_INTERVAL*1000)});
