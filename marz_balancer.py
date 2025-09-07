@@ -465,11 +465,11 @@ async def index(request: Request):
     </div>
 </div>
 
-<!-- Копирайт в нижнем правом углу -->
+<!-- Текстовая ссылка-копирайт в нижнем правом углу -->
 <a href="https://github.com/Makar-aka/marz-balancer"
    target="_blank" rel="noopener noreferrer"
-   class="text-decoration-none"
-   style="position:fixed; right:12px; bottom:12px; z-index:9999; background:#212529; color:#fff; padding:6px 10px; border-radius:8px; font-size:12px; opacity:.85;">
+   class="position-fixed end-0 bottom-0 m-3 small text-muted text-decoration-underline"
+   style="z-index:9999;">
    &copy; MakarSPB
 </a>
 
