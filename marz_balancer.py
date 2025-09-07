@@ -314,6 +314,103 @@ def _parse_ss_output_for_remote_ips(output: str) -> List[str]:
             ip = m.group(1)
             ips.add(ip)
 
+async def poll_loop():
+    async with aiohttp.ClientSession() as session:
+        while True:
+            try:
+                token = await _fetch_token(session)
+
+                # parallel master calls: nodes, system, nodes_usage, users_usage
+                tasks_master = [
+                    _fetch_nodes(session, token),
+                    _fetch_system(session, token),
+                    _fetch_nodes_usage(session, token),
+                    _fetch_users_usage(session, token),
+                ]
+                nodes, system_stat, nodes_usage, users_usage = await asyncio.gather(*tasks_master)
+
+                # store master-level data
+                stats["system"] = system_stat
+                stats["nodes_usage"] = nodes_usage
+                stats["users_usage"] = users_usage
+
+                if nodes is None:
+                    stats["error"] = "failed to fetch nodes"
+                    stats["nodes"] = []
+                    stats["last_update"] = time.time()
+                    await asyncio.sleep(POLL_INTERVAL)
+                    continue
+
+                # build base nodes info
+                node_entries: List[Dict[str, Any]] = []
+                for n in nodes:
+                    entry = {
+                        "id": n.get("id"),
+                        "name": n.get("name"),
+                        "address": n.get("address"),
+                        "api_port": n.get("api_port"),
+                        "status": n.get("status"),
+                        "message": n.get("message"),
+                        # placeholders for clients data
+                        "clients_count": None,
+                        "clients": [],
+                        "detected_path": None,
+                        "clients_error": None,
+                        # usage fields (from nodes_usage)
+                        "uplink": None,
+                        "downlink": None,
+                    }
+                    node_entries.append(entry)
+
+                # attach nodes_usage (uplink/downlink) if available
+                if nodes_usage and isinstance(nodes_usage, dict):
+                    usages = nodes_usage.get("usages") or []
+                    # usages: list of {node_id,node_name,uplink,downlink}
+                    for entry in node_entries:
+                        # try match by id then by name
+                        for u in usages:
+                            if (entry["id"] is not None and u.get("node_id") == entry["id"]) or (u.get("node_name") and u.get("node_name") == entry.get("name")):
+                                entry["uplink"] = u.get("uplink")
+                                entry["downlink"] = u.get("downlink")
+                                break
+
+                # concurrently query node APIs for live clients
+                tasks = [fetch_node_clients(session, n) for n in nodes]
+                clients_results = await asyncio.gather(*tasks, return_exceptions=True)
+
+                # attach results to node_entries (match by index)
+                for i, res in enumerate(clients_results):
+                    if isinstance(res, Exception):
+                        node_entries[i]["clients_error"] = str(res)
+                        node_entries[i]["clients_count"] = None
+                        continue
+                    node_entries[i]["clients_count"] = res.get("count", 0)
+                    node_entries[i]["clients"] = res.get("clients", [])
+                    node_entries[i]["detected_path"] = res.get("detected_path")
+                    node_entries[i]["clients_error"] = res.get("error")
+                    # attach optional meta (port/trusted) if provided by node microservice
+                    if res.get("port") is not None:
+                        node_entries[i]["clients_port"] = res.get("port")
+                    if res.get("meta") is not None:
+                        node_entries[i]["clients_meta"] = res.get("meta")
+
+                stats["nodes"] = node_entries
+
+                # get unique remote IPs to MONITOR_PORT without blocking loop (local fallback)
+                try:
+                    unique_ips = await asyncio.to_thread(get_unique_remote_ips, MONITOR_PORT)
+                    stats["port_8443"] = {"unique_clients": len(unique_ips), "clients": unique_ips[:200]}
+                except Exception:
+                    stats["port_8443"] = {"unique_clients": 0, "clients": []}
+
+                stats["error"] = None
+                stats["last_update"] = time.time()
+            except Exception as ex:
+                stats["error"] = str(ex)
+                stats["nodes"] = []
+                stats["last_update"] = time.time()
+            await asyncio.sleep(POLL_INTERVAL)
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # start background polling task
