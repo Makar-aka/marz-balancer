@@ -1,13 +1,11 @@
 import os
 import time
 import asyncio
-import sqlite3
 from datetime import datetime, timedelta
 from typing import Dict, Any, Optional, List
 from contextlib import asynccontextmanager
 
 import aiohttp
-import pandas as pd
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -19,7 +17,6 @@ MARZBAN_ADMIN_USER = os.getenv("MARZBAN_ADMIN_USER", "")
 MARZBAN_ADMIN_PASS = os.getenv("MARZBAN_ADMIN_PASS", "")
 POLL_INTERVAL = float(os.getenv("POLL_INTERVAL", "5"))
 APP_PORT = int(os.getenv("APP_PORT", "8023"))
-DB_PATH = os.getenv("STATS_DB_PATH", "/data/stats.db")
 
 # runtime state
 stats: Dict[str, Any] = {
@@ -30,49 +27,6 @@ stats: Dict[str, Any] = {
     "nodes_usage": None,
     "users_usage": None,
 }
-
-# Initialize database
-def init_db():
-    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS nodes (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL UNIQUE,
-                address TEXT,
-                api_port INTEGER
-            )
-        """)
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS node_metrics (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                node_id INTEGER NOT NULL,
-                timestamp DATETIME NOT NULL,
-                users_count INTEGER NOT NULL,
-                FOREIGN KEY (node_id) REFERENCES nodes (id)
-            )
-        """)
-        conn.commit()
-init_db()
-
-# Save node stats to the database
-def save_node_stats(nodes):
-    ts = datetime.utcnow().isoformat()
-    print("Сохраняем данные о нодах:", nodes)  # Отладочный вывод
-    with sqlite3.connect(DB_PATH) as conn:
-        for n in nodes:
-            conn.execute("""
-                INSERT INTO nodes (name, address, api_port)
-                VALUES (?, ?, ?)
-                ON CONFLICT(name) DO UPDATE SET address=excluded.address, api_port=excluded.api_port
-            """, (n.get('name'), n.get('address'), n.get('api_port')))
-            
-            node_id = conn.execute("SELECT id FROM nodes WHERE name = ?", (n.get('name'),)).fetchone()[0]
-            conn.execute("""
-                INSERT INTO node_metrics (node_id, timestamp, users_count)
-                VALUES (?, ?, ?)
-            """, (node_id, ts, n.get('clients_count') or 0))
-        conn.commit()
 
 # Fetch token for authentication
 async def _fetch_token(session: aiohttp.ClientSession) -> Optional[str]:
@@ -102,7 +56,6 @@ async def poll_loop():
                 # Fetch nodes and save stats
                 nodes = await _fetch_nodes(session, token)
                 if nodes:
-                    save_node_stats(nodes)
                     stats["nodes"] = nodes  # Обновляем stats["nodes"]
                 stats["last_update"] = time.time()
             except Exception as ex:
