@@ -402,13 +402,11 @@ async def poll_loop():
 async def lifespan(app: FastAPI):
     if not MARZBAN_URL:
         stats["error"] = "MARZBAN_URL not configured"
-    if TORRENT_DPI_ENABLED:
-        start_torrent_dpi()
     task = asyncio.create_task(poll_loop())
     try:
         yield
     finally:
-        stop_torrent_dpi()
+        
         task.cancel()
         try:
             await task
@@ -452,17 +450,6 @@ async def index(request: Request):
     system = stats.get("system")
     port_info = stats.get("port_8443", {})
     last_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(last)) if last else "—"
-
-    # --- Блок уведомлений о торрентах ---
-    torrent_alerts = stats.get("torrent_alerts", [])
-    torrent_html = ""
-    if TORRENT_DPI_ENABLED and torrent_alerts:
-        torrent_html = "<div class='alert alert-warning mb-3'><b>BitTorrent-активность:</b><ul class='mb-0'>"
-        for alert in reversed(torrent_alerts[-10:]):
-            torrent_html += f"<li>{alert['time']}: {alert['ip']} → {alert['dst']} — {alert['desc']}</li>"
-        torrent_html += "</ul></div>"
-    elif TORRENT_DPI_ENABLED:
-        torrent_html = "<div class='alert alert-success mb-3'>BitTorrent-активность не обнаружена</div>"
 
     header = f"""
     <div class="mb-3 d-flex flex-wrap align-items-center">
