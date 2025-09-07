@@ -6,10 +6,18 @@ import re
 from typing import Dict, Any, Optional, List
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
+import threading
+
 import aiohttp
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
+
+# --- Новый импорт для DPI-модуля ---
+try:
+    from scapy.all import sniff, Raw, TCP
+except ImportError:
+    sniff = None  # scapy не установлен
 
 load_dotenv()
 
@@ -19,19 +27,18 @@ MARZBAN_ADMIN_PASS = os.getenv("MARZBAN_ADMIN_PASS", "")
 POLL_INTERVAL = float(os.getenv("POLL_INTERVAL", "5"))
 APP_PORT = int(os.getenv("APP_PORT", "8023"))
 IP_AGENT_PORT = os.getenv("IP_AGENT_PORT", "").strip()
-# схема для ip_agent (по умолчанию http)
 IP_AGENT_SCHEME = os.getenv("IP_AGENT_SCHEME", "http").strip()
 
-# port to monitor for unique client IPs
 MONITOR_PORT = int(os.getenv("MONITOR_PORT", "8443"))
 
-# candidate node endpoints to try for live clients
-# Оставляем только необходимые пути — приоритет: /connections (ip_agent), затем запасные /clients и /status
 NODE_CANDIDATE_PATHS = [
     "/connections",
     "/clients",
     "/status",
 ]
+
+# --- Новая настройка для DPI-модуля ---
+TORRENT_DPI_ENABLED = os.getenv("TORRENT_DPI_ENABLED", "0") == "1"
 
 # runtime state
 stats: Dict[str, Any] = {
@@ -42,9 +49,9 @@ stats: Dict[str, Any] = {
     "nodes_usage": None,
     "users_usage": None,
     "port_8443": {"unique_clients": 0, "clients": []},
+    "torrent_alerts": [],  # <--- уведомления о торрентах
 }
 _token_cache: Dict[str, Any] = {"token": None, "fetched_at": 0, "ttl": 300}
-
 
 async def _fetch_token(session: aiohttp.ClientSession) -> Optional[str]:
     if not MARZBAN_URL or not MARZBAN_ADMIN_USER or not MARZBAN_ADMIN_PASS:
@@ -69,7 +76,6 @@ async def _fetch_token(session: aiohttp.ClientSession) -> Optional[str]:
         return None
     return None
 
-
 async def _fetch_nodes(session: aiohttp.ClientSession, token: Optional[str]) -> Optional[List[Dict[str, Any]]]:
     if not MARZBAN_URL:
         return None
@@ -85,7 +91,6 @@ async def _fetch_nodes(session: aiohttp.ClientSession, token: Optional[str]) -> 
     except Exception:
         return None
 
-
 async def _fetch_system(session: aiohttp.ClientSession, token: Optional[str]) -> Optional[Dict[str, Any]]:
     if not MARZBAN_URL:
         return None
@@ -100,7 +105,6 @@ async def _fetch_system(session: aiohttp.ClientSession, token: Optional[str]) ->
             return await resp.json()
     except Exception:
         return None
-
 
 async def _fetch_nodes_usage(session: aiohttp.ClientSession, token: Optional[str], start: Optional[str] = None, end: Optional[str] = None) -> Optional[Dict[str, Any]]:
     if not MARZBAN_URL:
@@ -122,7 +126,6 @@ async def _fetch_nodes_usage(session: aiohttp.ClientSession, token: Optional[str
     except Exception:
         return None
 
-
 async def _fetch_users_usage(session: aiohttp.ClientSession, token: Optional[str], start: Optional[str] = None, end: Optional[str] = None) -> Optional[List[Dict[str, Any]]]:
     if not MARZBAN_URL:
         return None
@@ -143,27 +146,23 @@ async def _fetch_users_usage(session: aiohttp.ClientSession, token: Optional[str
     except Exception:
         return None
 
-
 def _build_node_base(node: Dict[str, Any]) -> str:
     addr = node.get("address") or node.get("name") or ""
     api_port = node.get("api_port")
     if not addr:
         return ""
     if addr.startswith("http://") or addr.startswith("https://"):
-        # если в адресе нет порта — добавляем api_port или глобальный IP_AGENT_PORT
         if ":" not in addr.split("://", 1)[1]:
             if api_port:
                 return f"{addr.rstrip('/')}:{api_port}"
             if IP_AGENT_PORT:
                 return f"{addr.rstrip('/')}:{IP_AGENT_PORT}"
         return addr.rstrip("/")
-    # addr без схемы: используем api_port, иначе fallback на IP_AGENT_PORT
     if api_port:
         return f"http://{addr}:{api_port}"
     if IP_AGENT_PORT:
         return f"http://{addr}:{IP_AGENT_PORT}"
     return f"http://{addr}"
-
 
 async def _try_node_path(session: aiohttp.ClientSession, base: str, path: str, timeout_s: int = 5) -> Optional[Any]:
     url = f"{base.rstrip('/')}{path}"
@@ -179,12 +178,7 @@ async def _try_node_path(session: aiohttp.ClientSession, base: str, path: str, t
     except Exception as ex:
         return {"error": str(ex)}
 
-
 def _normalize_node_response(data: Any) -> Dict[str, Any]:
-    """
-    Нормализует разные форматы ответа ноды в единый {'count': int, 'clients': list}.
-    Поддерживает стандартные ключи clients/connections/peers и новый формат с 'ips'.
-    """
     clients: List[Any] = []
     count = 0
     if isinstance(data, list):
@@ -192,21 +186,17 @@ def _normalize_node_response(data: Any) -> Dict[str, Any]:
         count = len(clients)
         return {"count": count, "clients": clients}
     if isinstance(data, dict):
-        # first, handle explicit "ips" microservice format
         if "ips" in data and isinstance(data["ips"], list):
             clients = data["ips"]
             count = int(data.get("count", len(clients)))
             return {"count": count, "clients": clients, "port": data.get("port"), "meta": {k: data.get(k) for k in ("count_ipv4_enabled", "count_ipv6_enabled", "trusted_ips_configured") if k in data}}
-        # common keys for list of clients
         for key in ("clients", "connections", "peers", "addresses"):
             if key in data and isinstance(data[key], list):
                 clients = data[key]
                 count = len(clients)
                 return {"count": count, "clients": clients}
-        # if node returns only count number
         if "count" in data and isinstance(data["count"], int):
             return {"count": data["count"], "clients": []}
-        # fallback: find any list value
         for k, v in data.items():
             if isinstance(v, list):
                 clients = v
@@ -214,54 +204,35 @@ def _normalize_node_response(data: Any) -> Dict[str, Any]:
                 return {"count": count, "clients": clients}
     return {"count": count, "clients": clients}
 
-
 def _build_ip_agent_base(node: Dict[str, Any]) -> Optional[str]:
-    """
-    Построить базовый URL до ip_agent для конкретной ноды.
-    Приоритет:
-     - если node.address содержит схему, использовать её и IP_AGENT_PORT (если указан)
-     - иначе использовать IP_AGENT_SCHEME и IP_AGENT_PORT
-    Возвращает строку типа "http://host:port" или None при отсутствии адреса.
-    """
     addr = node.get("address") or node.get("name") or ""
     if not addr:
         return None
-    # если адрес содержит схему, используем её
     if addr.startswith("http://") or addr.startswith("https://"):
-        # если в адресе нет порта — добавить IP_AGENT_PORT если есть
         host_part = addr.rstrip("/")
         if ":" not in host_part.split("://", 1)[1] and IP_AGENT_PORT:
             return f"{host_part}:{IP_AGENT_PORT}"
         return host_part
-    # без схемы
     port = IP_AGENT_PORT or node.get("api_port")
     scheme = IP_AGENT_SCHEME or "http"
     if port:
         return f"{scheme}://{addr}:{port}"
     return f"{scheme}://{addr}"
 
-
 async def fetch_node_clients(session: aiohttp.ClientSession, node: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Сначала явно пробует ip_agent /connections по предопределённому порту (IP_AGENT_PORT),
-    затем — fallback на стандартную логику перебора NODE_CANDIDATE_PATHS.
-    """
     result = {"count": 0, "clients": [], "detected_path": None, "error": None}
     base_ip_agent = _build_ip_agent_base(node)
-    # попытка напрямую опросить ip_agent /connections первым
     if base_ip_agent:
         res = await _try_node_path(session, base_ip_agent, "/connections", timeout_s=5)
         if res is not None and not (isinstance(res, dict) and res.get("error")):
             norm = _normalize_node_response(res)
             if norm.get("count", 0) > 0 or len(norm.get("clients", [])) > 0 or isinstance(res, (list, dict)):
-                # attach meta/port if present
                 if isinstance(norm, dict) and "meta" in norm:
                     result["meta"] = norm["meta"]
                 if isinstance(norm, dict) and "port" in norm:
                     result["port"] = norm["port"]
                 result.update({"count": norm.get("count", 0), "clients": norm.get("clients", []), "detected_path": f"{base_ip_agent}/connections"})
                 return result
-    # fallback: старая логика с перебором путей
     base = _build_node_base(node)
     if not base:
         result["error"] = "no base address"
@@ -293,34 +264,90 @@ async def fetch_node_clients(session: aiohttp.ClientSession, node: Dict[str, Any
     result["error"] = "no usable endpoint"
     return result
 
-
-# ------------------ new: unique connections counter (fallback) ------------------
 def _parse_ss_output_for_remote_ips(output: str) -> List[str]:
     ips = set()
-    # each useful line contains Local Address:Port  Peer Address:Port
     for line in output.splitlines():
         line = line.strip()
         if not line or line.lower().startswith("netid") or line.lower().startswith("state"):
             continue
-        # peer is usually last column
         parts = re.split(r"\s+", line)
         if len(parts) < 1:
             continue
         peer = parts[-1]
-        # strip possible brackets for IPv6 and port
-        # match ending :port
         m = re.match(r"^\[?([^\]]+?)\]?:(\d+)$", peer)
         if m:
             ip = m.group(1)
             ips.add(ip)
+
+# --- DPI-модуль на scapy ---
+def _torrent_signature(payload: bytes) -> bool:
+    signatures = [
+        b"BitTorrent protocol",
+        b"announce",
+        b"info_hash",
+        b"peer_id",
+        b"get_peers",
+        b"find_node",
+        b"BitComet",
+        b"BitLord",
+        b"Azureus",
+        b"Utorrent",
+        b"Transmission",
+    ]
+    return any(sig in payload for sig in signatures)
+
+def _dpi_sniffer_worker(alerts_list: List[Dict[str, str]], stop_event: threading.Event):
+    if sniff is None:
+        return
+    def process(pkt):
+        if pkt.haslayer(Raw) and pkt.haslayer(TCP):
+            payload = pkt[Raw].load
+            if _torrent_signature(payload):
+                src = pkt[0][1].src if hasattr(pkt[0][1], 'src') else "unknown"
+                dst = pkt[0][1].dst if hasattr(pkt[0][1], 'dst') else "unknown"
+                alert = {
+                    "ip": src,
+                    "dst": dst,
+                    "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+                    "desc": "Обнаружен BitTorrent-трафик"
+                }
+                if alert not in alerts_list:
+                    alerts_list.append(alert)
+                    if len(alerts_list) > 20:
+                        del alerts_list[0]
+    while not stop_event.is_set():
+        try:
+            sniff(filter="tcp", prn=process, store=0, timeout=5)
+        except Exception:
+            time.sleep(1)
+
+_dpi_thread = None
+_dpi_stop_event = threading.Event()
+def start_torrent_dpi():
+    global _dpi_thread, _dpi_stop_event
+    if sniff is None:
+        print("scapy не установлен, DPI-модуль не запущен")
+        return
+    if _dpi_thread and _dpi_thread.is_alive():
+        return
+    _dpi_stop_event.clear()
+    _dpi_thread = threading.Thread(
+        target=_dpi_sniffer_worker,
+        args=(stats["torrent_alerts"], _dpi_stop_event),
+        daemon=True
+    )
+    _dpi_thread.start()
+    print("DPI-модуль для BitTorrent запущен")
+
+def stop_torrent_dpi():
+    global _dpi_stop_event
+    _dpi_stop_event.set()
 
 async def poll_loop():
     async with aiohttp.ClientSession() as session:
         while True:
             try:
                 token = await _fetch_token(session)
-
-                # parallel master calls: nodes, system, nodes_usage, users_usage
                 tasks_master = [
                     _fetch_nodes(session, token),
                     _fetch_system(session, token),
@@ -328,8 +355,6 @@ async def poll_loop():
                     _fetch_users_usage(session, token),
                 ]
                 nodes, system_stat, nodes_usage, users_usage = await asyncio.gather(*tasks_master)
-
-                # store master-level data
                 stats["system"] = system_stat
                 stats["nodes_usage"] = nodes_usage
                 stats["users_usage"] = users_usage
@@ -341,7 +366,6 @@ async def poll_loop():
                     await asyncio.sleep(POLL_INTERVAL)
                     continue
 
-                # build base nodes info
                 node_entries: List[Dict[str, Any]] = []
                 for n in nodes:
                     entry = {
@@ -351,34 +375,27 @@ async def poll_loop():
                         "api_port": n.get("api_port"),
                         "status": n.get("status"),
                         "message": n.get("message"),
-                        # placeholders for clients data
                         "clients_count": None,
                         "clients": [],
                         "detected_path": None,
                         "clients_error": None,
-                        # usage fields (from nodes_usage)
                         "uplink": None,
                         "downlink": None,
                     }
                     node_entries.append(entry)
 
-                # attach nodes_usage (uplink/downlink) if available
                 if nodes_usage and isinstance(nodes_usage, dict):
                     usages = nodes_usage.get("usages") or []
-                    # usages: list of {node_id,node_name,uplink,downlink}
                     for entry in node_entries:
-                        # try match by id then by name
                         for u in usages:
                             if (entry["id"] is not None and u.get("node_id") == entry["id"]) or (u.get("node_name") and u.get("node_name") == entry.get("name")):
                                 entry["uplink"] = u.get("uplink")
                                 entry["downlink"] = u.get("downlink")
                                 break
 
-                # concurrently query node APIs for live clients
                 tasks = [fetch_node_clients(session, n) for n in nodes]
                 clients_results = await asyncio.gather(*tasks, return_exceptions=True)
 
-                # attach results to node_entries (match by index)
                 for i, res in enumerate(clients_results):
                     if isinstance(res, Exception):
                         node_entries[i]["clients_error"] = str(res)
@@ -388,7 +405,6 @@ async def poll_loop():
                     node_entries[i]["clients"] = res.get("clients", [])
                     node_entries[i]["detected_path"] = res.get("detected_path")
                     node_entries[i]["clients_error"] = res.get("error")
-                    # attach optional meta (port/trusted) if provided by node microservice
                     if res.get("port") is not None:
                         node_entries[i]["clients_port"] = res.get("port")
                     if res.get("meta") is not None:
@@ -396,7 +412,6 @@ async def poll_loop():
 
                 stats["nodes"] = node_entries
 
-                # get unique remote IPs to MONITOR_PORT without blocking loop (local fallback)
                 try:
                     unique_ips = await asyncio.to_thread(get_unique_remote_ips, MONITOR_PORT)
                     stats["port_8443"] = {"unique_clients": len(unique_ips), "clients": unique_ips[:200]}
@@ -413,13 +428,15 @@ async def poll_loop():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # start background polling task
     if not MARZBAN_URL:
         stats["error"] = "MARZBAN_URL not configured"
+    if TORRENT_DPI_ENABLED:
+        start_torrent_dpi()
     task = asyncio.create_task(poll_loop())
     try:
         yield
     finally:
+        stop_torrent_dpi()
         task.cancel()
         try:
             await task
@@ -427,7 +444,6 @@ async def lifespan(app: FastAPI):
             pass
 
 def human_bytes(num: Optional[int]) -> str:
-    """Форматирует байты в человекочитаемый вид (КБ, МБ, ГБ, ТБ)."""
     if num is None:
         return "—"
     for unit in ['Б', 'КБ', 'МБ', 'ГБ', 'ТБ', 'ПБ']:
@@ -439,7 +455,6 @@ def human_bytes(num: Optional[int]) -> str:
     return f"{num:.2f} ЭБ"
 
 def get_usage_range(period: str) -> tuple[Optional[str], Optional[str]]:
-    """Возвращает (start, end) в формате ISO8601 для заданного периода."""
     now = datetime.utcnow()
     if period == "1d":
         start = (now - timedelta(days=1)).isoformat(timespec="seconds") + "Z"
@@ -457,7 +472,6 @@ APP = FastAPI(lifespan=lifespan)
 async def api_stats():
     return JSONResponse(content=stats)
 
-
 @APP.get("/", response_class=HTMLResponse)
 async def index(request: Request):
     nodes = stats.get("nodes", [])
@@ -467,10 +481,20 @@ async def index(request: Request):
     port_info = stats.get("port_8443", {})
     last_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(last)) if last else "—"
 
+    # --- Блок уведомлений о торрентах ---
+    torrent_alerts = stats.get("torrent_alerts", [])
+    torrent_html = ""
+    if TORRENT_DPI_ENABLED and torrent_alerts:
+        torrent_html = "<div class='alert alert-warning mb-3'><b>BitTorrent-активность:</b><ul class='mb-0'>"
+        for alert in reversed(torrent_alerts[-10:]):
+            torrent_html += f"<li>{alert['time']}: {alert['ip']} → {alert['dst']} — {alert['desc']}</li>"
+        torrent_html += "</ul></div>"
+    elif TORRENT_DPI_ENABLED:
+        torrent_html = "<div class='alert alert-success mb-3'>BitTorrent-активность не обнаружена</div>"
+
     header = f"""
     <div class="mb-3 d-flex flex-wrap align-items-center">
         <span class="badge bg-secondary">Последнее обновление: {last_str}</span>
-        <span class="badge bg-info text-dark ms-2">Подключений к порту {MONITOR_PORT}: {port_info.get('unique_clients', '—')}</span>
     </div>
     """
     if system:
@@ -518,6 +542,7 @@ async def index(request: Request):
 <body class="bg-light">
 <div class="container py-4">
     <h1 class="mb-4">Marzban — Ноды</h1>
+    {torrent_html}
     {header}
     <div style="color:#b00">{err or ''}</div>
     <div class="row row-cols-1 row-cols-md-2 row-cols-lg-3 g-4">
