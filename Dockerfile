@@ -6,7 +6,7 @@ WORKDIR /app
 COPY requirements.txt .
 
 RUN pip install --no-cache-dir -r requirements.txt
-RUN pip install --no-cache-dir scapy
+
 # Копируем основной скрипт и .env (если нужно)
 COPY marz_balancer.py .
 COPY .env .env

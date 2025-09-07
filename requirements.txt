@@ -2,4 +2,3 @@ fastapi
 aiohttp
 python-dotenv
 uvicorn
-scapy
