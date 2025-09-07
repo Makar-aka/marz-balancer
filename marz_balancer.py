@@ -539,7 +539,7 @@ async def users_graph_interactive(request: Request, period: str = "1d", interval
     fig = go.Figure(data=data, layout=layout)
     fig.update_yaxes(tickformat="d")  # Только целые числа
 
-    # HTML с переключателями периода и интервала
+    # HTML с переключателями периода и интервала и автообновлением графика
     html = f"""
     <!doctype html>
     <html lang="ru">
@@ -579,9 +579,28 @@ async def users_graph_interactive(request: Request, period: str = "1d", interval
         <div id="users-plot"></div>
         <a href="/" class="btn btn-secondary mt-3">Назад к нодам</a>
     </div>
+    <script id="plotly-data" type="application/json">{fig.to_json()}</script>
     <script>
-        var plot_data = {fig.to_json()};
+        // Первичная отрисовка
+        var plot_data = JSON.parse(document.getElementById('plotly-data').textContent);
         Plotly.newPlot('users-plot', plot_data.data, plot_data.layout, {{responsive: true}});
+
+        // Автообновление графика каждые 30 секунд
+        setInterval(function() {{
+            fetch(window.location.pathname + window.location.search, {{
+                headers: {{'X-Requested-With': 'XMLHttpRequest'}}
+            }})
+            .then(resp => resp.text())
+            .then(html => {{
+                var parser = new DOMParser();
+                var doc = parser.parseFromString(html, 'text/html');
+                var newData = doc.querySelector('#plotly-data');
+                if (newData) {{
+                    var plot_data = JSON.parse(newData.textContent);
+                    Plotly.react('users-plot', plot_data.data, plot_data.layout, {{responsive: true}});
+                }}
+            }});
+        }}, 30000); // 30 секунд
     </script>
     </body>
     </html>
