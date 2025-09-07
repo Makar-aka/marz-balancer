@@ -532,16 +532,18 @@ async def users_graph_interactive(request: Request, period: str = "1d", interval
     df['dt'] = pd.to_datetime(df['ts'], unit='s')
     df['users_count'] = df['users_count'].astype(int)
     df.set_index('dt', inplace=True)
-    df_grouped = df.groupby(['node_name', 'dt']).agg({'users_count': 'max'}).reset_index()
-    df_grouped.set_index('dt', inplace=True)
-    # Агрегация по интервалу и сортировка
+
+    # Группируем по node_name и dt, чтобы избежать дублирования данных
+    df_grouped = df.groupby(['node_name', 'dt'], as_index=False)['users_count'].max()
+
     data = []
     for node in sorted(df_grouped['node_name'].unique()):
-        node_df = df_grouped[df_grouped['node_name'] == node].resample(interval).max()
+        node_df = df_grouped[df_grouped['node_name'] == node].copy()
+        node_df = node_df.set_index('dt').resample(interval).max()
         node_df = node_df.sort_index()
         data.append(go.Scatter(
             x=node_df.index,
-            y=node_df['users_count'],
+            y=node_df['users_count'],  # Указываем колонку явно
             mode='lines+markers',
             name=node,
             line=dict(width=2)
