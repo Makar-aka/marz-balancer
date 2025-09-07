@@ -13,6 +13,7 @@ services:
       - ./marz_balancer.py:/app/marz_balancer.py:ro
       - ./requirements.txt:/app/requirements.txt:ro
       - ./.env:/app/.env:ro
+      - ./data:/data
     working_dir: /app
     command: >
       sh -c "pip install --no-cache-dir -r requirements.txt && python marz_balancer.py"

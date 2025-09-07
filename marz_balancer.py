@@ -3,13 +3,16 @@ import time
 import asyncio
 import subprocess
 import re
+import sqlite3
+import io
+import matplotlib.pyplot as plt
 from typing import Dict, Any, Optional, List
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 import aiohttp
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 
 load_dotenv()
 
@@ -143,6 +146,29 @@ async def _fetch_users_usage(session: aiohttp.ClientSession, token: Optional[str
     except Exception:
         return None
 
+DB_PATH = os.getenv("STATS_DB_PATH", "/data/stats.db")
+
+def init_db():
+    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS node_users (
+                ts INTEGER,
+                node_name TEXT,
+                users_count INTEGER
+            )
+        """)
+        conn.commit()
+
+def save_node_stats(nodes):
+    ts = int(time.time())
+    with sqlite3.connect(DB_PATH) as conn:
+        for n in nodes:
+            conn.execute(
+                "INSERT INTO node_users (ts, node_name, users_count) VALUES (?, ?, ?)",
+                (ts, n.get('name') or n.get('address'), n.get('clients_count') or 0)
+            )
+        conn.commit()
 
 def _build_node_base(node: Dict[str, Any]) -> str:
     addr = node.get("address") or node.get("name") or ""
@@ -457,6 +483,31 @@ APP = FastAPI(lifespan=lifespan)
 async def api_stats():
     return JSONResponse(content=stats)
 
+@APP.get("/users_graph.png")
+async def users_graph():
+    with sqlite3.connect(DB_PATH) as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT DISTINCT node_name FROM node_users")
+        nodes = [row[0] for row in cur.fetchall()]
+        data = {}
+        for node in nodes:
+            cur.execute("SELECT ts, users_count FROM node_users WHERE node_name=? ORDER BY ts", (node,))
+            rows = cur.fetchall()
+            data[node] = ([r[0] for r in rows], [r[1] for r in rows])
+
+    plt.figure(figsize=(10, 4))
+    for node, (ts, users) in data.items():
+        if ts:
+            plt.plot([datetime.fromtimestamp(t) for t in ts], users, label=node)
+    plt.xlabel("Время")
+    plt.ylabel("Пользователей")
+    plt.legend()
+    plt.tight_layout()
+    buf = io.BytesIO()
+    plt.savefig(buf, format="png")
+    plt.close()
+    buf.seek(0)
+    return StreamingResponse(buf, media_type="image/png")
 
 @APP.get("/", response_class=HTMLResponse)
 async def index(request: Request):
@@ -504,7 +555,10 @@ async def index(request: Request):
         """
     if not items:
         items = "<div class='alert alert-warning'>Ноды не обнаружены.</div>"
-
+        <div class="mb-4">
+            <h5>График количества пользователей по нодам</h5>
+            <img src="/users_graph.png?{{ last_str }}" class="img-fluid" alt="График пользователей">
+        </div>
     html = f"""<!doctype html>
 <html lang="ru">
 <head>
