@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 
 import aiohttp
+import redis.asyncio as redis
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -21,6 +22,11 @@ POLL_INTERVAL = float(os.getenv("POLL_INTERVAL", "5"))
 APP_PORT = int(os.getenv("APP_PORT", "8023"))
 IP_AGENT_PORT = os.getenv("IP_AGENT_PORT", "").strip()
 IP_AGENT_SCHEME = os.getenv("IP_AGENT_SCHEME", "http").strip()
+TELEGRAM_ENABLED = os.getenv("TELEGRAM_ENABLED", "false").lower() in ("true", "1", "yes")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+NODE_REMINDER_INTERVAL = int(os.getenv("NODE_REMINDER_INTERVAL", "6"))
 
 MONITOR_PORT = int(os.getenv("MONITOR_PORT", "8443"))
 
@@ -30,7 +36,6 @@ NODE_CANDIDATE_PATHS = [
     "/status",
 ]
 
-# runtime state
 stats: Dict[str, Any] = {
     "nodes": [],
     "last_update": None,
@@ -41,6 +46,119 @@ stats: Dict[str, Any] = {
     "port_8443": {"unique_clients": 0, "clients": []},
 }
 _token_cache: Dict[str, Any] = {"token": None, "fetched_at": 0, "ttl": 300}
+redis_client = None
+
+async def init_redis():
+    global redis_client
+    if REDIS_URL:
+        try:
+            redis_client = await redis.from_url(REDIS_URL)
+            return True
+        except Exception as e:
+            print(f"Ошибка подключения к Redis: {e}")
+    return False
+
+async def send_telegram_message(message):
+    if not TELEGRAM_ENABLED or not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        return
+    try:
+        async with aiohttp.ClientSession() as session:
+            api_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+            payload = {
+                "chat_id": TELEGRAM_CHAT_ID,
+                "text": message,
+                "parse_mode": "HTML"
+            }
+            async with session.post(api_url, json=payload) as response:
+                return await response.json()
+    except Exception as e:
+        print(f"Ошибка отправки в Telegram: {e}")
+
+async def get_node_status_from_redis(node_id):
+    if not redis_client:
+        return None
+    try:
+        status = await redis_client.get(f"node:{node_id}:status")
+        return status.decode('utf-8') if status else None
+    except Exception:
+        return None
+
+async def save_node_status_to_redis(node_id, status):
+    if not redis_client:
+        return
+    try:
+        await redis_client.set(f"node:{node_id}:status", status)
+    except Exception:
+        pass
+
+async def set_node_last_notified(node_id):
+    if not redis_client:
+        return
+    try:
+        current_time = datetime.utcnow().timestamp()
+        await redis_client.set(f"node:{node_id}:last_notified", str(current_time))
+    except Exception:
+        pass
+
+async def get_node_last_notified(node_id):
+    if not redis_client:
+        return None
+    try:
+        result = await redis_client.get(f"node:{node_id}:last_notified")
+        return float(result) if result else None
+    except Exception:
+        return None
+
+async def check_node_status_changes(nodes):
+    for node in nodes:
+        node_id = node.get("id")
+        if not node_id:
+            continue
+            
+        current_status = node.get("status")
+        previous_status = await get_node_status_from_redis(node_id)
+        
+        if previous_status is not None and previous_status != current_status:
+            node_name = node.get("name") or node.get("address") or f"Node {node_id}"
+            
+            if current_status != "connected" and previous_status == "connected":
+                message = f"⚠️ <b>Нода недоступна:</b> {node_name}\n"
+                message += f"Текущий статус: {current_status}"
+                await send_telegram_message(message)
+                await set_node_last_notified(node_id)
+                
+            elif current_status == "connected" and previous_status != "connected":
+                message = f"✅ <b>Нода снова доступна:</b> {node_name}"
+                await send_telegram_message(message)
+                
+        await save_node_status_to_redis(node_id, current_status)
+
+async def check_offline_nodes_reminders(nodes):
+    current_time = datetime.utcnow().timestamp()
+    reminder_interval_seconds = NODE_REMINDER_INTERVAL * 3600
+    
+    for node in nodes:
+        node_id = node.get("id")
+        if not node_id:
+            continue
+            
+        current_status = node.get("status")
+        
+        if current_status != "connected":
+            last_notified = await get_node_last_notified(node_id)
+            
+            if last_notified is None or (current_time - last_notified) > reminder_interval_seconds:
+                node_name = node.get("name") or node.get("address") or f"Node {node_id}"
+                hours_offline = "неизвестно"
+                if last_notified:
+                    hours = (current_time - last_notified) / 3600
+                    hours_offline = f"{hours:.1f}"
+                    
+                message = f"⚠️ <b>Напоминание:</b> Нода {node_name} остаётся недоступной {hours_offline} часов\n"
+                message += f"Статус: {current_status}"
+                
+                await send_telegram_message(message)
+                await set_node_last_notified(node_id)
 
 async def _fetch_token(session: aiohttp.ClientSession) -> Optional[str]:
     if not MARZBAN_URL or not MARZBAN_ADMIN_USER or not MARZBAN_ADMIN_PASS:
@@ -253,6 +371,15 @@ async def fetch_node_clients(session: aiohttp.ClientSession, node: Dict[str, Any
     result["error"] = "no usable endpoint"
     return result
 
+def get_unique_remote_ips(port: int) -> List[str]:
+    try:
+        cmd = ["ss", "-n", "-t", "state", "established", f"sport = {port}"]
+        output = subprocess.check_output(cmd, text=True)
+        return _parse_ss_output_for_remote_ips(output)
+    except Exception as ex:
+        print(f"Ошибка получения удалённых IP: {ex}")
+        return []
+
 def _parse_ss_output_for_remote_ips(output: str) -> List[str]:
     ips = set()
     for line in output.splitlines():
@@ -267,8 +394,10 @@ def _parse_ss_output_for_remote_ips(output: str) -> List[str]:
         if m:
             ip = m.group(1)
             ips.add(ip)
+    return list(ips)
 
 async def poll_loop():
+    await init_redis()
     async with aiohttp.ClientSession() as session:
         while True:
             try:
@@ -334,6 +463,10 @@ async def poll_loop():
                         node_entries[i]["clients_port"] = res.get("port")
                     if res.get("meta") is not None:
                         node_entries[i]["clients_meta"] = res.get("meta")
+
+                if TELEGRAM_ENABLED and redis_client:
+                    await check_node_status_changes(node_entries)
+                    await check_offline_nodes_reminders(node_entries)
 
                 stats["nodes"] = node_entries
 
@@ -403,7 +536,6 @@ async def index(request: Request):
     port_info = stats.get("port_8443", {})
     last_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(last)) if last else "—"
 
-    # суммарное количество активных клиентов по всем нодам
     total_clients = sum(int(n.get('clients_count') or 0) for n in nodes)
 
     header = f"""
@@ -411,6 +543,7 @@ async def index(request: Request):
         <span class="badge bg-secondary">Последнее обновление: {last_str}</span>
         <span class="badge bg-info text-dark ms-2">Подключений к порту {MONITOR_PORT}: {port_info.get('unique_clients', '—')}</span>
         <span class="badge bg-dark ms-2">Активных клиентов: {total_clients}</span>
+        {'<span class="badge bg-success ms-2">Telegram уведомления: включены</span>' if TELEGRAM_ENABLED else '<span class="badge bg-danger ms-2">Telegram уведомления: выключены</span>'}
     </div>
     """
     if system:
@@ -452,7 +585,6 @@ async def index(request: Request):
     <meta charset="utf-8">
     <title>Marzban nodes</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <!-- Bootstrap 5 CDN -->
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
 </head>
 <body class="bg-light">
@@ -478,6 +610,7 @@ setTimeout(()=>location.reload(), {int(POLL_INTERVAL*1000)});
 </body>
 </html>"""
     return HTMLResponse(content=html)
+
 if __name__ == "__main__":
     import uvicorn
 
