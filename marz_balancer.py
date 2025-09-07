@@ -441,38 +441,68 @@ async def index():
     port_info = stats.get("port_8443", {})
     last_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(last)) if last else "—"
 
-    header = f"<div>Последнее обновление: {last_str}</div>"
-    header += f"<div>Подключений к порту {MONITOR_PORT}: {port_info.get('unique_clients', '—')}</div>"
+    header = f"""
+    <div class="mb-3">
+        <span class="badge bg-secondary">Последнее обновление: {last_str}</span>
+        <span class="badge bg-info text-dark ms-2">Подключений к порту {MONITOR_PORT}: {port_info.get('unique_clients', '—')}</span>
+    </div>
+    """
     if system:
-        header += f"<div>Online users (master): {system.get('online_users', '—')}</div>"
-        header += f"<div>Incoming bandwidth: {system.get('incoming_bandwidth', '—')}</div>"
-        header += f"<div>Outgoing bandwidth: {system.get('outgoing_bandwidth', '—')}</div>"
+        header += f"""
+        <div class="mb-3">
+            <span class="badge bg-success">Online users (master): {system.get('online_users', '—')}</span>
+            <span class="badge bg-primary ms-2">Incoming bandwidth: {system.get('incoming_bandwidth', '—')}</span>
+            <span class="badge bg-primary ms-2">Outgoing bandwidth: {system.get('outgoing_bandwidth', '—')}</span>
+        </div>
+        """
 
     items = ""
     for n in nodes:
-        items += "<div style='border:1px solid #ddd;padding:8px;margin:6px;'>"
-        items += f"<b>{n.get('name') or n.get('address')}</b><br/>"
-        items += f"Address: {n.get('address') or '—'}<br/>"
-        items += f"API port: {n.get('api_port') or '—'}<br/>"
-        items += f"Status: {n.get('status') or '—'}<br/>"
-        items += f"Clients: {n.get('clients_count') if n.get('clients_count') is not None else '—'}<br/>"
-        items += f"Uplink: {n.get('uplink') if n.get('uplink') is not None else '—'} Downlink: {n.get('downlink') if n.get('downlink') is not None else '—'}<br/>"
-        if n.get("clients_error"):
-            items += f"<div style='color:#b00'>Clients error: {n.get('clients_error')}</div>"
-        items += "</div>"
+        items += f"""
+        <div class="col">
+            <div class="card shadow-sm mb-4">
+                <div class="card-header bg-light">
+                    <b>{n.get('name') or n.get('address')}</b>
+                </div>
+                <div class="card-body">
+                    <ul class="list-group list-group-flush">
+                        <li class="list-group-item"><b>Address:</b> {n.get('address') or '—'}</li>
+                        <li class="list-group-item"><b>API port:</b> {n.get('api_port') or '—'}</li>
+                        <li class="list-group-item"><b>Status:</b> {n.get('status') or '—'}</li>
+                        <li class="list-group-item"><b>Clients:</b> {n.get('clients_count') if n.get('clients_count') is not None else '—'}</li>
+                        <li class="list-group-item"><b>Uplink:</b> {n.get('uplink') if n.get('uplink') is not None else '—'} <b>Downlink:</b> {n.get('downlink') if n.get('downlink') is not None else '—'}</li>
+                    </ul>
+                    {"<div class='alert alert-danger mt-2'>Clients error: " + n.get('clients_error') + "</div>" if n.get('clients_error') else ""}
+                </div>
+            </div>
+        </div>
+        """
     if not items:
-        items = "<div>Ноды не обнаружены.</div>"
+        items = "<div class='alert alert-warning'>Ноды не обнаружены.</div>"
 
     html = f"""<!doctype html>
-<html><head><meta charset="utf-8"><title>Marzban nodes</title></head><body>
-<h1>Marzban — ноды</h1>
-{header}
-<div style="color:#b00">{err or ''}</div>
-<div>{items}</div>
+<html lang="ru">
+<head>
+    <meta charset="utf-8">
+    <title>Marzban nodes</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <!-- Bootstrap 5 CDN -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+</head>
+<body class="bg-light">
+<div class="container py-4">
+    <h1 class="mb-4">Marzban — Ноды</h1>
+    {header}
+    <div style="color:#b00">{err or ''}</div>
+    <div class="row row-cols-1 row-cols-md-2 row-cols-lg-3 g-4">
+        {items}
+    </div>
+</div>
 <script>
 setTimeout(()=>location.reload(), {int(POLL_INTERVAL*1000)});
 </script>
-</body></html>"""
+</body>
+</html>"""
     return HTMLResponse(content=html)
 
 if __name__ == "__main__":
