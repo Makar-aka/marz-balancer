@@ -532,13 +532,12 @@ async def users_graph_interactive(request: Request, period: str = "1d", interval
     df['dt'] = pd.to_datetime(df['ts'], unit='s')
     df['users_count'] = df['users_count'].astype(int)
     df.set_index('dt', inplace=True)
-
+    df_grouped = df.groupby(['node_name', 'dt']).agg({'users_count': 'max'}).reset_index()
+    df_grouped.set_index('dt', inplace=True)
     # Агрегация по интервалу и сортировка
     data = []
-    for node in sorted(df['node_name'].unique()):
-        node_df = df[df['node_name'] == node].resample(interval).max()
-        # Если хотите видеть пропуски как NaN (без линии) — не заполняйте нулями
-        # node_df = node_df.fillna(0)
+    for node in sorted(df_grouped['node_name'].unique()):
+        node_df = df_grouped[df_grouped['node_name'] == node].resample(interval).max()
         node_df = node_df.sort_index()
         data.append(go.Scatter(
             x=node_df.index,
