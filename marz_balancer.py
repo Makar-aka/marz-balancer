@@ -314,4 +314,58 @@ def _parse_ss_output_for_remote_ips(output: str) -> List[str]:
         if m:
             ip = m.group(1)
             ips.add(ip)
-           
+
+@APP.get("/api/stats")
+async def api_stats():
+    return JSONResponse(content=stats)
+
+
+@APP.get("/", response_class=HTMLResponse)
+async def index():
+    nodes = stats.get("nodes", [])
+    last = stats.get("last_update")
+    err = stats.get("error")
+    system = stats.get("system")
+    port_info = stats.get("port_8443", {})
+    last_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(last)) if last else "—"
+
+    header = f"<div>Последнее обновление: {last_str}</div>"
+    header += f"<div>Подключений к порту {MONITOR_PORT}: {port_info.get('unique_clients', '—')}</div>"
+    if system:
+        header += f"<div>Online users (master): {system.get('online_users', '—')}</div>"
+        header += f"<div>Incoming bandwidth: {system.get('incoming_bandwidth', '—')}</div>"
+        header += f"<div>Outgoing bandwidth: {system.get('outgoing_bandwidth', '—')}</div>"
+
+    items = ""
+    for n in nodes:
+        items += "<div style='border:1px solid #ddd;padding:8px;margin:6px;'>"
+        items += f"<b>{n.get('name') or n.get('address')}</b><br/>"
+        items += f"Address: {n.get('address') or '—'}<br/>"
+        items += f"API port: {n.get('api_port') or '—'}<br/>"
+        items += f"Status: {n.get('status') or '—'}<br/>"
+        # Показываем только clients_count (число клиентов с ip_agent)
+        items += f"Clients: {n.get('clients_count') if n.get('clients_count') is not None else '—'}<br/>"
+        items += f"Uplink: {n.get('uplink') if n.get('uplink') is not None else '—'} Downlink: {n.get('downlink') if n.get('downlink') is not None else '—'}<br/>"
+        if n.get("clients_error"):
+            items += f"<div style='color:#b00'>Clients error: {n.get('clients_error')}</div>"
+        items += "</div>"
+    if not items:
+        items = "<div>Ноды не обнаружены.</div>"
+
+    html = f"""<!doctype html>
+<html><head><meta charset="utf-8"><title>Marzban nodes</title></head><body>
+<h1>Marzban — ноды</h1>
+{header}
+<div style="color:#b00">{err or ''}</div>
+<div>{items}</div>
+<script>
+setTimeout(()=>location.reload(), {int(POLL_INTERVAL*1000)});
+</script>
+</body></html>"""
+    return HTMLResponse(content=html)
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run("marz_balancer:APP", host="0.0.0.0", port=APP_PORT, reload=True)           
