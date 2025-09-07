@@ -360,7 +360,7 @@ async def poll_loop():
                 # store master-level data
                 stats["system"] = system_stat
                 stats["nodes_usage"] = nodes_usage
-                save_node_stats(node_entries)
+                #save_node_stats(node_entries)
                 stats["users_usage"] = users_usage
 
                 if nodes is None:
