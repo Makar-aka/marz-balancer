@@ -459,14 +459,13 @@ def get_usage_range(period: str) -> tuple[Optional[str], Optional[str]]:
 
 @APP.get("/", response_class=HTMLResponse)
 async def index(request: Request):
-    # Получаем выбранный период из query-параметра, по умолчанию "all"
     period = request.query_params.get("usage_period", "all")
     start, end = get_usage_range(period)
 
-    # Получаем usage с нужным диапазоном (если изменился)
-    # stats['nodes_usage'] и stats['users_usage'] обновляются только в poll_loop,
-    # поэтому для демо просто передаём выбранный период в шаблон.
-    # Для полной поддержки — нужно доработать poll_loop и хранить usage по разным периодам.
+    # Получаем usage прямо сейчас, а не из poll_loop
+    async with aiohttp.ClientSession() as session:
+        token = await _fetch_token(session)
+        nodes_usage = await _fetch_nodes_usage(session, token, start, end)
 
     nodes = stats.get("nodes", [])
     last = stats.get("last_update")
