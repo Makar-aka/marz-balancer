@@ -360,6 +360,7 @@ async def poll_loop():
                 # store master-level data
                 stats["system"] = system_stat
                 stats["nodes_usage"] = nodes_usage
+                save_node_stats(node_entries)
                 stats["users_usage"] = users_usage
 
                 if nodes is None:
@@ -623,7 +624,7 @@ async def index(request: Request):
     header = f"""
     <div class="mb-3 d-flex flex-wrap align-items-center">
         <span class="badge bg-secondary">Последнее обновление: {last_str}</span>
-        <a href="/users_graph_interactive" class="btn btn-outline-primary btn-sm ms-3">Интерактивный график</a>
+        <a href="/users_graph_interactive" class="btn btn-outline-primary btn-sm ms-3">График</a>
     </div>
     """
     if system:
