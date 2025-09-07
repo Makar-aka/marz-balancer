@@ -58,6 +58,7 @@ init_db()
 # Save node stats to the database
 def save_node_stats(nodes):
     ts = datetime.utcnow().isoformat()
+    print("Сохраняем данные о нодах:", nodes)  # Отладочный вывод
     with sqlite3.connect(DB_PATH) as conn:
         for n in nodes:
             conn.execute("""
@@ -87,7 +88,8 @@ async def _fetch_token(session: aiohttp.ClientSession) -> Optional[str]:
                 return None
             j = await resp.json()
             return j.get("access_token") or j.get("token")
-    except Exception:
+    except Exception as e:
+        print("Ошибка при получении токена:", e)  # Отладочный вывод
         return None
 
 # Polling loop to fetch data periodically
@@ -95,16 +97,19 @@ async def poll_loop():
     async with aiohttp.ClientSession() as session:
         while True:
             try:
+                print("Обновляем данные о нодах...")  # Отладочный вывод
                 token = await _fetch_token(session)
                 # Fetch nodes and save stats
                 nodes = await _fetch_nodes(session, token)
                 if nodes:
                     save_node_stats(nodes)
+                    stats["nodes"] = nodes  # Обновляем stats["nodes"]
                 stats["last_update"] = time.time()
             except Exception as ex:
                 stats["error"] = str(ex)
+                print("Ошибка в poll_loop:", ex)  # Отладочный вывод
             await asyncio.sleep(POLL_INTERVAL)
-print("Отладка: nodes =", nodes)
+
 # Fetch nodes
 async def _fetch_nodes(session: aiohttp.ClientSession, token: Optional[str]) -> Optional[List[Dict[str, Any]]]:
     if not MARZBAN_URL:
@@ -115,8 +120,11 @@ async def _fetch_nodes(session: aiohttp.ClientSession, token: Optional[str]) -> 
         async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as resp:
             if resp.status != 200:
                 return None
-            return await resp.json()
-    except Exception:
+            nodes = await resp.json()
+            print("Полученные данные о нодах:", nodes)  # Отладочный вывод
+            return nodes
+    except Exception as e:
+        print("Ошибка при получении данных о нодах:", e)  # Отладочный вывод
         return None
 
 # FastAPI app
@@ -145,11 +153,12 @@ async def index(request: Request):
     last_update = stats.get("last_update")
     error = stats.get("error")
 
+    print("Отладка: stats['nodes'] =", nodes)  # Отладочный вывод
+
     last_update_str = (
         datetime.fromtimestamp(last_update).strftime("%Y-%m-%d %H:%M:%S")
         if last_update
         else "—"
-print("Отладка: stats['nodes'] =", stats["nodes"]) 
     )
 
     html = f"""
