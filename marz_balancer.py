@@ -13,6 +13,8 @@ import aiohttp
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from bokeh.plotting import figure
+from bokeh.embed import components
 import pandas as pd
 import plotly.graph_objs as go
 load_dotenv()
