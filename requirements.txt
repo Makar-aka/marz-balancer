@@ -6,3 +6,4 @@ scapy
 matplotlib
 plotly
 pandas
+bokeh
