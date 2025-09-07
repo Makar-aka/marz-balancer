@@ -149,28 +149,45 @@ async def _try_node_path(session: aiohttp.ClientSession, base: str, path: str, t
 def _normalize_node_response(data: Any) -> Dict[str, Any]:
     clients: List[Any] = []
     count = 0
+    count_all = None  # Новое поле для общего числа подключений
+    
     if isinstance(data, list):
         clients = data
         count = len(clients)
         return {"count": count, "clients": clients}
+    
     if isinstance(data, dict):
+        # Сохраняем общее количество соединений, если оно есть
+        if "count_all" in data and isinstance(data["count_all"], (int, float)):
+            count_all = int(data["count_all"])
+        
         if "ips" in data and isinstance(data["ips"], list):
             clients = data["ips"]
             count = int(data.get("count", len(clients)))
-            return {"count": count, "clients": clients, "port": data.get("port"), "meta": {k: data.get(k) for k in ("count_ipv4_enabled", "count_ipv6_enabled", "trusted_ips_configured") if k in data}}
+            return {
+                "count": count, 
+                "count_all": count_all,  # Добавляем новое поле
+                "clients": clients, 
+                "port": data.get("port"), 
+                "meta": {k: data.get(k) for k in ("count_ipv4_enabled", "count_ipv6_enabled", "trusted_ips_configured", "count_all") if k in data}
+            }
+            
         for key in ("clients", "connections", "peers", "addresses"):
             if key in data and isinstance(data[key], list):
                 clients = data[key]
                 count = len(clients)
-                return {"count": count, "clients": clients}
+                return {"count": count, "count_all": count_all, "clients": clients}
+                
         if "count" in data and isinstance(data["count"], int):
-            return {"count": data["count"], "clients": []}
+            return {"count": data["count"], "count_all": count_all, "clients": []}
+            
         for k, v in data.items():
             if isinstance(v, list):
                 clients = v
                 count = len(v)
-                return {"count": count, "clients": clients}
-    return {"count": count, "clients": clients}
+                return {"count": count, "count_all": count_all, "clients": clients}
+                
+    return {"count": count, "count_all": count_all, "clients": clients}
 
 def _build_ip_agent_base(node: Dict[str, Any]) -> Optional[str]:
     addr = node.get("address") or node.get("name") or ""
@@ -188,7 +205,7 @@ def _build_ip_agent_base(node: Dict[str, Any]) -> Optional[str]:
     return f"{scheme}://{addr}"
 
 async def fetch_node_clients(session: aiohttp.ClientSession, node: Dict[str, Any]) -> Dict[str, Any]:
-    result = {"count": 0, "clients": [], "detected_path": None, "error": None}
+    result = {"count": 0, "count_all": None, "clients": [], "detected_path": None, "error": None}
     base_ip_agent = _build_ip_agent_base(node)
     if base_ip_agent:
         res = await _try_node_path(session, base_ip_agent, "/connections", timeout_s=5)
@@ -199,6 +216,8 @@ async def fetch_node_clients(session: aiohttp.ClientSession, node: Dict[str, Any
                     result["meta"] = norm["meta"]
                 if isinstance(norm, dict) and "port" in norm:
                     result["port"] = norm["port"]
+                if norm.get("count_all") is not None:
+                    result["count_all"] = norm["count_all"]
                 result.update({"count": norm.get("count", 0), "clients": norm.get("clients", []), "detected_path": f"{base_ip_agent}/connections"})
                 return result
     base = _build_node_base(node)
@@ -226,6 +245,8 @@ async def fetch_node_clients(session: aiohttp.ClientSession, node: Dict[str, Any
                 result["meta"] = norm["meta"]
             if isinstance(norm, dict) and "port" in norm:
                 result["port"] = norm["port"]
+            if norm.get("count_all") is not None:
+                result["count_all"] = norm["count_all"]
             result.update({"count": norm.get("count", 0), "clients": norm.get("clients", []), "detected_path": p})
             return result
 
@@ -311,6 +332,7 @@ async def poll_loop():
                         node_entries[i]["clients_count"] = None
                         continue
                     node_entries[i]["clients_count"] = res.get("count", 0)
+                    node_entries[i]["count_all"] = res.get("count_all")  
                     node_entries[i]["clients"] = res.get("clients", [])
                     node_entries[i]["detected_path"] = res.get("detected_path")
                     node_entries[i]["clients_error"] = res.get("error")
@@ -381,34 +403,35 @@ async def api_stats():
 
 @APP.get("/", response_class=HTMLResponse)
 async def index(request: Request):
-    nodes = stats.get("nodes", [])
-    last = stats.get("last_update")
-    err = stats.get("error")
-    system = stats.get("system")
-    port_info = stats.get("port_8443", {})
-    last_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(last)) if last else "—"
-
+    # ... существующий код ...
+    
+    # Добавим подсчет общего количества подключений
     total_clients = sum(int(n.get('clients_count') or 0) for n in nodes)
-
+    total_connections = sum(int(n.get('count_all') or n.get('clients_count') or 0) for n in nodes)
+    
+    # Обновим заголовок, добавив общее количество подключений
     header = f"""
     <div class="mb-3 d-flex flex-wrap align-items-center">
         <span class="badge bg-secondary">Последнее обновление: {last_str}</span>
         <span class="badge bg-info text-dark ms-2">Подключений к порту {MONITOR_PORT}: {port_info.get('unique_clients', '—')}</span>
-        <span class="badge bg-dark ms-2">Активных клиентов: {total_clients}</span>
+        <span class="badge bg-dark ms-2">Уникальных клиентов: {total_clients}</span>
+        <span class="badge bg-primary ms-2">Всего соединений: {total_connections}</span>
         {'<span class="badge bg-success ms-2">Telegram уведомления: включены</span>' if TELEGRAM_ENABLED else '<span class="badge bg-danger ms-2">Telegram уведомления: выключены</span>'}
     </div>
     """
-    if system:
-        header += f"""
-        <div class="mb-3">
-            <span class="badge bg-success">Online users (master): {system.get('online_users', '—')}</span>
-            <span class="badge bg-primary ms-2">Incoming bandwidth: {human_bytes(system.get('incoming_bandwidth'))}</span>
-            <span class="badge bg-primary ms-2">Outgoing bandwidth: {human_bytes(system.get('outgoing_bandwidth'))}</span>
-        </div>
-        """
-
+    
+    # ... существующий код ...
+    
+    # Обновим карточки нод для отображения общего количества подключений
     items = ""
     for n in nodes:
+        count_all = n.get('count_all')
+        clients_count = n.get('clients_count')
+        connections_info = ""
+        
+        if count_all is not None and count_all != clients_count:
+            connections_info = f"<b>Всего соединений:</b> {count_all}"
+        
         items += f"""
         <div class="col">
             <div class="card shadow-sm mb-4">
@@ -420,7 +443,10 @@ async def index(request: Request):
                         <li class="list-group-item"><b>Address:</b> {n.get('address') or '—'}</li>
                         <li class="list-group-item"><b>API port:</b> {n.get('api_port') or '—'}</li>
                         <li class="list-group-item"><b>Status:</b> {n.get('status') or '—'}</li>
-                        <li class="list-group-item"><b>Clients:</b> {n.get('clients_count') if n.get('clients_count') is not None else '—'}</li>
+                        <li class="list-group-item">
+                            <b>Клиентов:</b> {clients_count if clients_count is not None else '—'}
+                            {f" <span class='text-muted'>({count_all} соед.)</span>" if count_all is not None and count_all != clients_count else ""}
+                        </li>
                         <li class="list-group-item"><b>Uplink:</b> {human_bytes(n.get('uplink'))} <b>Downlink:</b> {human_bytes(n.get('downlink'))}</li>
                     </ul>
                     {"<div class='alert alert-danger mt-2'>Clients error: " + n.get('clients_error') + "</div>" if n.get('clients_error') else ""}
