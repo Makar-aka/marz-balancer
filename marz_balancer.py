@@ -464,13 +464,21 @@ async def index(request: Request):
         {items}
     </div>
 </div>
+
+<!-- Копирайт в нижнем правом углу -->
+<a href="https://github.com/Makar-aka/marz-balancer"
+   target="_blank" rel="noopener noreferrer"
+   class="text-decoration-none"
+   style="position:fixed; right:12px; bottom:12px; z-index:9999; background:#212529; color:#fff; padding:6px 10px; border-radius:8px; font-size:12px; opacity:.85;">
+   &copy; MakarSPB
+</a>
+
 <script>
 setTimeout(()=>location.reload(), {int(POLL_INTERVAL*1000)});
 </script>
 </body>
 </html>"""
     return HTMLResponse(content=html)
-
 if __name__ == "__main__":
     import uvicorn
 
