@@ -1,4 +1,5 @@
 fastapi
-aiohttp
-python-dotenv
 uvicorn
+python-dotenv
+aiohttp
+redis

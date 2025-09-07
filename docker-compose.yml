@@ -1,18 +1,19 @@
 services:
   marz_balancer:
     build: .
-    container_name: marz_balancer
-    restart: unless-stopped
-    env_file:
-      - .env
     ports:
       - "${APP_PORT:-8023}:8023"
+    restart: unless-stopped
+    depends_on:
+      - redis
     environment:
-      - PYTHONUNBUFFERED=1
+      - REDIS_URL=redis://redis:6379/0
+
+  redis:
+    image: redis:alpine
+    restart: unless-stopped
     volumes:
-      - ./marz_balancer.py:/app/marz_balancer.py:ro
-      - ./requirements.txt:/app/requirements.txt:ro
-      - ./.env:/app/.env:ro
-      - ./data:/data
-    working_dir: /app
-    command: python marz_balancer.py
+      - redis-data:/data
+
+volumes:
+  redis-data:
