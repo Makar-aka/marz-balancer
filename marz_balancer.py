@@ -539,8 +539,15 @@ async def users_graph_interactive(request: Request, period: str = "1d", interval
     data = []
     for node in sorted(df_grouped['node_name'].unique()):
         node_df = df_grouped[df_grouped['node_name'] == node].copy()
+    
+        # Проверяем, существует ли колонка 'dt'
+        if 'dt' not in node_df.columns:
+            raise ValueError(f"Колонка 'dt' отсутствует в данных для ноды {node}")
+    
+        # Устанавливаем индекс и выполняем ресемплинг
         node_df = node_df.set_index('dt').resample(interval).max()
         node_df = node_df.sort_index()
+    
         data.append(go.Scatter(
             x=node_df.index,
             y=node_df['users_count'],  # Указываем колонку явно
